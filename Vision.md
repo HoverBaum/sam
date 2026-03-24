@@ -88,11 +88,11 @@ All reads and writes go through the official `obsidian` CLI (v1.12+). This keeps
 
 ### Phase 0 — Foundation (start here)
 
-- Project scaffold (TypeScript, Ink, yargs)
+- Project scaffold (TypeScript, Ink, Deno)
 - `vault/client.ts`: wrap `obsidian` CLI commands
 - `ai/skill.ts`: load skill file → system prompt
 - `--dry-run` flag wired globally
-- `sam index`: embed vault notes into local vectra index
+- `sam index`: embed vault notes into local index
 
 ### Phase 1 — Capture pipeline
 
@@ -106,9 +106,9 @@ sam new   # opens $EDITOR for brain dump
 
 **Flow:**
 1. Ingest input (text, URL fetch, PDF extract)
-2. **Claude (structure):** raw input → Zettel draft using skill as system prompt
+2. **AI (structure):** raw input → Zettel draft using skill as system prompt
 3. **Search:** embed draft → cosine search vault index → top 5 related notes
-4. **Claude (link):** draft + related note titles/summaries → insert `[[wikilinks]]` naturally into body
+4. **AI (link):** draft + related note titles/summaries → insert `[[wikilinks]]` naturally into body
 5. **Ink review screen:** show draft with links; toggle links on/off; edit title; accept or discard
 6. On accept: `obsidian create` writes note to vault
 
@@ -151,19 +151,28 @@ When a source is added that already exists in the vault (same URL, same file has
 This is a pure deterministic script — no AI involved.
 
 ```bash
-sam scripts/canonicalize --source "old-note.md" --canonical "canonical-note.md"
+scripts/canonicalize --source "old-note.md" --canonical "canonical-note.md"
 # --dry-run supported
 ```
 
-### Phase 3 — Inbox processor
+### Phase 3 — Intake queues (multi-inbox processing)
 
 ```bash
-sam process          # oldest unprocessed inbox note
-sam process --all    # step through all inbox notes
-sam process --batch  # non-interactive, writes suggestions as comments in-note
+sam inbox --queue default                 # oldest unprocessed note in one queue
+sam inbox --queue reading                 # process a specific queue
+sam inbox --queue default --all           # step through all notes in one queue
+sam inbox --queue default --batch         # non-interactive, writes suggestions as comments in-note
+sam inbox --external discord --channel zettelkasten-capture --sync
 ```
 
-For each inbox note: Claude reads it, may suggest splitting into multiple Zettels, runs link surfacing, presents review. Processed notes move from `inbox/` to the appropriate vault folder via `obsidian move`.
+Use "intake queue" as the working name (better than "inbox" when there are many sources).
+
+Supported queue types in this phase:
+1. **Single-note queue:** one rolling note with many captured fragments; `sam inbox` can split the note into candidate Zettels.
+2. **Folder queue:** many notes in one or more vault folders (for example `inbox/`, `reading-inbox/`, `fleeting/`).
+3. **External queue:** imported capture streams (for example a Discord channel) synced into a local queue before processing.
+
+For each queued item: Claude reads it, may suggest splitting into multiple Zettels, runs link surfacing, presents review. Processed items move from the queue to the appropriate vault folder via `obsidian move`.
 
 ### Phase 4 — Skill interface (agent composition)
 
@@ -198,11 +207,3 @@ The CLI and skill share the same core pipeline modules. Ink is only imported in 
 | Find top-N related notes             |     | ✅ (vectra) |
 | Decide if a connection is meaningful |     | 🧠 human    |
 
----
-
-## Open questions (to revisit)
-
-- **Runtime:** Node/TypeScript vs. Deno — decision deferred. The architecture is compatible with either; Deno is appealing for its built-in toolchain and permissions model.
-- **Embedding model:** `nomic-embed-text` via ollama is the plan; benchmark against vault size to validate latency.
-- **Obsidian CLI stability:** Early Access as of v1.12 — keep `vault/client.ts` isolated so commands can be updated without touching the rest of the system.
-- **Connection surfacing as a standalone command:** A future `sam connections` command could periodically scan the vault for notes that *should* be linked but aren't, and present a review queue. Held for later — the philosophical question of whether this helps or hinders Zettelkasten thinking is still open.
