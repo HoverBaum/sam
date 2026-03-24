@@ -53,6 +53,8 @@ Resolution order:
   - New/modified files are reprocessed
   - Deleted files are removed from index/manifest
 - Profile mismatch guard prevents querying a dimension/provider-incompatible index.
+- Query behavior now surfaces an explicit error if no index exists (`run sam index`), instead of returning silent empty results.
+- `sam index --dry-run` is manifest-only and performs no Obsidian calls.
 
 ## Development
 
@@ -61,4 +63,3 @@ deno task check
 deno task test
 deno task dev
 ```
-

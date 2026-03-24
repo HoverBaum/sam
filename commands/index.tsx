@@ -7,6 +7,7 @@ import {
   assertProfileMatch,
   classifyStaleness,
   hashContent,
+  indexManifestSummary,
   readManifest,
   readStore,
   resolveActiveProfileDir,
@@ -50,8 +51,33 @@ export async function executeIndex(
 ): Promise<IndexRunResult> {
   const rebuild = booleanFlag(args.flags, "rebuild");
   const skipEmbed = booleanFlag(args.flags, "skip-embed");
-  const vault = new VaultClient(context.config);
 
+  const activeDir = await resolveActiveProfileDir(context.config);
+  const existingManifest = await readManifest(activeDir);
+  if (existingManifest) {
+    assertProfileMatch(context.config, existingManifest);
+  }
+
+  if (context.config.dryRun) {
+    const summary = indexManifestSummary(existingManifest);
+    console.log("=== SAM DRY RUN ===");
+    console.log(`command: sam index`);
+    console.log("mode: local-manifest-preview (no Obsidian calls)");
+    console.log(`indexed-files-known: ${summary.indexedFiles}`);
+    console.log(`profile: ${summary.profile}`);
+    console.log(`rebuild: ${rebuild}`);
+    console.log(`skip-embed: ${skipEmbed}`);
+    console.log("=== END DRY RUN ===");
+    return {
+      totalFiles: summary.indexedFiles,
+      indexedCount: summary.indexedFiles,
+      deletedCount: 0,
+      skipEmbed,
+      dryRun: true,
+    };
+  }
+
+  const vault = new VaultClient(context.config);
   onProgress({ phase: "Listing markdown files", done: 0, total: 1 });
   const paths = (await vault.files("md")).filter((line) => line.endsWith(".md"));
 
@@ -64,31 +90,8 @@ export async function executeIndex(
     }),
   );
 
-  const activeDir = await resolveActiveProfileDir(context.config);
-  const existingManifest = await readManifest(activeDir);
-  if (existingManifest) {
-    assertProfileMatch(context.config, existingManifest);
-  }
-
   const staleness = classifyStaleness(rebuild ? null : existingManifest, currentFiles);
   const targets = rebuild ? currentFiles.map((f) => f.path) : [...staleness.newPaths, ...staleness.modifiedPaths];
-
-  if (context.config.dryRun) {
-    console.log("=== SAM DRY RUN ===");
-    console.log(`command: sam index`);
-    console.log(`total-files: ${paths.length}`);
-    console.log(`to-index: ${targets.length}`);
-    console.log(`deleted: ${staleness.deletedPaths.length}`);
-    console.log(`skip-embed: ${skipEmbed}`);
-    console.log("=== END DRY RUN ===");
-    return {
-      totalFiles: paths.length,
-      indexedCount: targets.length,
-      deletedCount: staleness.deletedPaths.length,
-      skipEmbed,
-      dryRun: true,
-    };
-  }
 
   const store = await readStore(activeDir);
   const now = Date.now();

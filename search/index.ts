@@ -40,6 +40,11 @@ export interface StalenessSummary {
   currentPaths: string[];
 }
 
+export interface ManifestSummary {
+  indexedFiles: number;
+  profile: string;
+}
+
 function unknownProfilePrefix(config: RuntimeConfig): string {
   return `${config.embeddingProvider}_${config.embeddingModel}`.replace(/[^\w.-]+/g, "_");
 }
@@ -65,8 +70,27 @@ export async function resolveActiveProfileDir(config: RuntimeConfig): Promise<st
   const root = await indexRoot();
   const prefix = unknownProfilePrefix(config);
   const dirs = await listDirs(root);
-  const match = dirs.find((name) => name.startsWith(prefix));
-  return join(root, match ?? prefix);
+  const matches: Array<{ dir: string; manifest: IndexManifest }> = [];
+  for (const dir of dirs) {
+    if (!dir.startsWith(prefix)) continue;
+    const manifest = await readManifest(join(root, dir));
+    if (!manifest) continue;
+    if (manifest.profile.provider === config.embeddingProvider && manifest.profile.model === config.embeddingModel) {
+      matches.push({ dir, manifest });
+    }
+  }
+
+  if (matches.length === 1) {
+    return join(root, matches[0].dir);
+  }
+
+  if (matches.length > 1) {
+    throw new Error(
+      "Multiple index profiles found for this embedding provider/model. Run `sam index --rebuild` to select a single active profile.",
+    );
+  }
+
+  return join(root, prefix);
 }
 
 export async function resolveProfileDir(config: RuntimeConfig, dimensions: number): Promise<string> {
@@ -161,7 +185,9 @@ export async function query(
 ): Promise<Array<{ id: string; title: string; summary: string; score: number }>> {
   const dir = await resolveActiveProfileDir(config);
   const manifest = await readManifest(dir);
-  if (!manifest) return [];
+  if (!manifest) {
+    throw new Error("No index profile found. Run `sam index` to build the index.");
+  }
   assertProfileMatch(config, manifest, vector.length);
 
   const store = await readStore(dir);
@@ -176,3 +202,16 @@ export async function query(
     .slice(0, topN);
 }
 
+export function indexManifestSummary(manifest: IndexManifest | null): ManifestSummary {
+  if (!manifest) {
+    return {
+      indexedFiles: 0,
+      profile: "(none)",
+    };
+  }
+
+  return {
+    indexedFiles: Object.keys(manifest.files).length,
+    profile: `${manifest.profile.provider}/${manifest.profile.model}/${manifest.profile.dimensions}`,
+  };
+}
