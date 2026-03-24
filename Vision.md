@@ -27,11 +27,11 @@ Every command that would modify the vault supports `--dry-run`. Show exactly wha
 **3. Human decides connections.**
 AI surfaces related notes as candidates. The human decides whether a link is meaningful. The Zettelkasten only grows stronger if the connections reflect real understanding — not pattern-matching.
 
-**4. Skills as configuration.**
-Note structuring behavior is driven by a skill file. Users can bring their own skills to change how notes are written. The tool is a pipeline; the skill is the style layer.
+**4. Prompting lives in product code for now.**
+The first version should keep note-structuring behavior in versioned code, not external skill files. That keeps the system easier to reason about while the workflow is still being discovered.
 
-**5. Composable: CLI for daily use, skill interface for agents.**
-`sam` commands work standalone in the terminal. The same logic is also exposed as an agent skill so it can be called from a larger multi-agent system. Both interfaces are first-class.
+**5. CLI first, composability later.**
+`sam` should be excellent as a daily-use CLI before we package it for larger agent systems. Internal modules should still be cleanly composable, but exported agent-facing interfaces are not part of the first milestone.
 
 **6. Vault I/O via Obsidian CLI.**
 All reads and writes go through the official `obsidian` CLI (v1.12+). This keeps sync, conflict resolution, and file management within Obsidian's control. The embedding pipeline reads vault files directly for performance, but never writes directly.
@@ -66,15 +66,15 @@ All reads and writes go through the official `obsidian` CLI (v1.12+). This keeps
 
 | Module                 | Responsibility                                                              |
 | ---------------------- | --------------------------------------------------------------------------- |
-| `cli.tsx`              | Entry point, command routing, global flags (`--dry-run`, `--skill`) |
+| `cli.tsx`              | Entry point, command routing, global flags (`--dry-run`, `--model`) |
 | `commands/new.tsx`     | Capture pipeline: ingest → structure → link → review → write                |
 | `commands/index.ts`    | Vault embedding indexer, watch mode                                         |
 | `commands/process.tsx` | Inbox processor: batch review of unprocessed notes                          |
 | `commands/source.ts`   | Source pipeline: URL/file → note, with deduplication logic                  |
 | `ai/provider.ts`       | Provider abstraction: route calls to Claude, OpenAI, Gemini, or local LLM   |
+| `ai/instructions.ts`   | Built-in prompt text and prompt assembly                                    |
 | `ai/structure.ts`      | AI: raw input → structured Zettel draft                                     |
 | `ai/link.ts`           | AI: draft + related notes → wikilinks woven into body                       |
-| `ai/skill.ts`          | Load and apply skill files as system prompts                                |
 | `search/embed.ts`      | ollama/nomic-embed wrapper                                                  |
 | `search/index.ts`      | vectra index: build, update, query                                          |
 | `vault/client.ts`      | Thin wrapper over `obsidian` CLI commands (CRUD, backlinks, links, orphans)  |
@@ -91,7 +91,7 @@ All reads and writes go through the official `obsidian` CLI (v1.12+). This keeps
 
 - Project scaffold (TypeScript, Ink, Deno)
 - `vault/client.ts`: wrap `obsidian` CLI commands
-- `ai/skill.ts`: load skill file → system prompt
+- `ai/instructions.ts`: define built-in system prompts
 - `--dry-run` flag wired globally
 - `sam index`: embed vault notes into local index
 
@@ -107,7 +107,7 @@ sam new   # opens $EDITOR for brain dump
 
 **Flow:**
 1. Ingest input (text, URL fetch, PDF extract)
-2. **AI (structure):** raw input → Zettel draft using skill as system prompt
+2. **AI (structure):** raw input → Zettel draft using built-in system instructions
 3. **Search:** embed draft → cosine search vault index → top 5 related notes
 4. **AI (link):** draft + related note titles/summaries → insert `[[wikilinks]]` naturally into body
 5. **Ink review screen:** show draft with links; toggle links on/off; edit title; accept or discard
@@ -175,23 +175,13 @@ Supported queue types in this phase:
 
 For each queued item: Claude reads it, may suggest splitting into multiple Zettels, runs link surfacing, presents review. Processed items move from the queue to the appropriate vault folder via `obsidian move`.
 
-### Phase 4 — Skill interface (agent composition)
+## Future vision — packaging `sam` as a skill
 
-Expose `sam` functionality as a callable skill for use in larger agent systems:
+Skill support is intentionally out of scope for the first implementation, but it remains a good long-term direction once the workflow is proven.
 
-```typescript
-// skill interface — same logic as CLI, no Ink dependency
-import { captureNote } from "sam/skill";
+If we package `sam` as a skill later, the skill should be derived from real execution traces and project-specific conventions rather than generic prompt-writing. That means extracting concrete procedures, gotchas, templates, and validation loops from actual usage of the CLI.
 
-const result = await captureNote({
-  input: "brain dump text or URL",
-  skill: "./my-skill.md",
-  dryRun: true,
-});
-// returns: { draft, suggestedLinks, filename }
-```
-
-The CLI and skill share the same core pipeline modules. Ink is only imported in CLI entry points.
+The future skill should also follow progressive disclosure: keep the always-loaded instructions short, then load detailed references only when the current task requires them. The goal is not to make skills the architecture; it is to wrap a working architecture in a well-scoped skill once the product behavior is stable.
 
 ---
 

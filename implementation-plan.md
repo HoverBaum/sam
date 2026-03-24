@@ -15,6 +15,7 @@
 | Vector index | **vectra** (JSON-backed) | Simple local index, no server needed |
 | Vault I/O | **obsidian CLI v1.12+** | Official interface; keeps sync/conflict handling in Obsidian |
 | Source fetching | **fetch + pdf-parse** | URL content and PDF text extraction |
+| Prompting | **Built-in prompts** (`ai/instructions.ts`) | Keep note-creation behavior versioned in product code for now |
 
 ---
 
@@ -30,9 +31,9 @@ sam/
 │   └── source.ts             # Source pipeline (URL / PDF)
 ├── ai/
 │   ├── provider.ts           # Provider abstraction (Claude / OpenAI / Gemini / local)
+│   ├── instructions.ts       # Built-in system prompts and prompt assembly
 │   ├── structure.ts          # AI: raw input → Zettel draft
-│   ├── link.ts               # AI: draft + candidates → wikilinks
-│   └── skill.ts              # Load skill file → system prompt
+│   └── link.ts               # AI: draft + candidates → wikilinks
 ├── search/
 │   ├── embed.ts              # ollama nomic-embed wrapper
 │   └── index.ts              # vectra build / update / query
@@ -46,10 +47,8 @@ sam/
 ├── ui/
 │   ├── ReviewScreen.tsx      # Ink: show draft, accept / edit / discard
 │   └── LinkPicker.tsx        # Ink: toggle suggested wikilinks
-├── skill/
-│   └── index.ts              # Headless skill interface (no Ink)
 ├── deno.json                 # Tasks, import map, permissions
-└── default-skill.md          # Bundled default Zettelkasten style prompt
+└── README.md                 # Project overview and usage
 ```
 
 ---
@@ -63,7 +62,7 @@ sam/
 #### P0-1: Project scaffold
 - [ ] `deno.json` with tasks: `dev`, `build`, `test`
 - [ ] Import map pointing to npm specifiers for Ink, and AI provider SDKs as needed
-- [ ] `cli.tsx` entry with `--dry-run` and `--skill` global flags wired
+- [ ] `cli.tsx` entry with `--dry-run` and `--model` global flags wired
 - [ ] Compile check passes (`deno check`)
 
 #### P0-2: `vault/client.ts` — obsidian CLI wrapper
@@ -84,11 +83,11 @@ sam/
 - [ ] Config shape: `{ provider: string, model?: string, apiKey?: string, baseUrl?: string }`
 - [ ] All `ai/` modules receive a provider instance; never import an SDK directly
 
-#### P0-3b: `ai/skill.ts` — skill file loader
-- [ ] Read a `.md` skill file from disk
-- [ ] Parse optional YAML front matter (name, version, model overrides)
-- [ ] Return `{ systemPrompt: string, modelOverrides?: {...} }`
-- [ ] Fall back to bundled `default-skill.md` when no `--skill` flag
+#### P0-3b: `ai/instructions.ts` — built-in prompt assembly
+- [ ] Define the core system prompt for note structuring and link-weaving
+- [ ] Keep prompt text versioned in the repo, not loaded from external skill files
+- [ ] Support provider/model-specific tweaks in code where needed
+- [ ] Return prompt fragments/helpers that `ai/structure.ts` and `ai/link.ts` can reuse
 
 #### P0-4: `sam index` command (`commands/index.ts`)
 - [ ] Walk vault directory via `vault/read.ts`
@@ -113,7 +112,7 @@ sam/
 - [ ] Return normalized `{ rawContent: string, sourceUrl?: string, sourceFile?: string }`
 
 #### P1-2: `ai/structure.ts` — structure raw input
-- [ ] Build prompt: skill system prompt + raw content
+- [ ] Build prompt: built-in system instructions + raw content
 - [ ] Call provider via `ai/provider.ts`; expect back: `{ title, tags, body }` (structured Zettel)
 - [ ] Parse and validate response
 - [ ] Return typed `ZettelDraft`
@@ -206,26 +205,17 @@ sam/
 
 ---
 
-## Phase 4 — Skill Interface (Agent Composition)
+## Future Direction — Skill Packaging (Out of Scope for v1)
 
-**Goal:** Expose core pipeline as a headless, importable skill.
+We are explicitly not building skill loading or skill export in the first implementation. The near-term product is a CLI with built-in prompting and a stable internal pipeline.
 
-### Tasks
+If we later package `sam` as a skill or skill-building tool, use these constraints:
 
-#### P4-1: `skill/index.ts` — headless API
-- [ ] Export `captureNote({ input, skill, dryRun, provider? })` → `{ draft, suggestedLinks, filename }`
-- [ ] Export `indexVault({ vaultPath })` → `void`
-- [ ] Export `queryRelated({ text, topN })` → `RelatedNote[]`
-- [ ] Zero Ink imports; pure async functions
-
-#### P4-2: Shared pipeline refactor
-- [ ] Ensure `commands/new.tsx` delegates to the same functions exported by `skill/index.ts`
-- [ ] CLI = skill interface + Ink review layer
-- [ ] Validate: all Phase 1 unit tests pass against skill interface directly
-
-#### P4-3: Skill documentation
-- [ ] `skill/README.md`: usage examples, return types, environment requirements
-- [ ] JSDoc on all exported functions
+- Start from real usage traces and working operator behavior, not generic LLM advice
+- Keep the core `SKILL.md` concise; move large references behind progressive disclosure
+- Encode concrete gotchas, templates, and validation loops instead of vague "best practices"
+- Provide defaults rather than menus when a canonical path exists
+- Treat skill packaging as a thin wrapper over a proven pipeline, not the primary architecture
 
 ---
 
@@ -259,8 +249,6 @@ P1-1 → P1-2 → P1-3 → P1-4 → P1-5 → P1-6   (Capture — core daily-use 
 P2-1 → P2-2 → P2-3 → P2-4   (Source — dedup + canonicalize)
          ↓
 P3-1 → P3-2 → P3-3 → P3-4   (Intake queues)
-         ↓
-P4-1 → P4-2 → P4-3           (Skill interface)
 ```
 
 Each phase is independently shippable. Phase 1 (`sam new`) provides the most immediate value and should be the first usable milestone.
