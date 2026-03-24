@@ -17,6 +17,11 @@ export interface UnresolvedLink {
   sources: string[];
 }
 
+export interface FileStatEntry {
+  path: string;
+  mtime: number;
+}
+
 function decode(bytes: Uint8Array): string {
   return new TextDecoder().decode(bytes).trim();
 }
@@ -71,6 +76,34 @@ function toArrayPayload(payload: unknown): unknown[] {
   return [];
 }
 
+function chunk<T>(items: T[], size: number): T[][] {
+  if (size <= 0) {
+    return [items];
+  }
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+function readFileStatMap(payload: unknown): Record<string, number> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {};
+  }
+  const out: Record<string, number> = {};
+  for (const [path, value] of Object.entries(payload)) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      out[path] = value;
+      continue;
+    }
+    if (typeof value === "string" && !Number.isNaN(Number(value))) {
+      out[path] = Number(value);
+    }
+  }
+  return out;
+}
+
 async function runObsidian(
   config: RuntimeConfig,
   tokens: string[],
@@ -118,6 +151,8 @@ async function runObsidian(
 export class VaultClient {
   constructor(private readonly config: RuntimeConfig) {}
 
+  private static readonly STAT_BATCH_SIZE = 200;
+
   async currentVaultName(): Promise<string> {
     const stdout = await runObsidian(this.config, ["vault", "info=name"]);
     const first = splitLines(stdout)[0];
@@ -159,6 +194,26 @@ export class VaultClient {
 
   async eval(code: string): Promise<string> {
     return runObsidian(this.config, ["eval", `code=${code}`]);
+  }
+
+  async fileStats(paths: string[]): Promise<FileStatEntry[]> {
+    if (paths.length === 0) {
+      return [];
+    }
+
+    const out: FileStatEntry[] = [];
+    for (const batch of chunk(paths, VaultClient.STAT_BATCH_SIZE)) {
+      const code =
+        `JSON.stringify(Object.fromEntries(${JSON.stringify(batch)}.map((path) => [path, app.vault.getAbstractFileByPath(path)?.stat?.mtime ?? 0])))`;
+      const stdout = await runObsidian(this.config, ["eval", `code=${code}`]);
+      const payload = parseJson(stdout, "eval");
+      const mtimes = readFileStatMap(payload);
+      for (const path of batch) {
+        const mtime = mtimes[path] ?? 0;
+        out.push({ path, mtime: Number.isFinite(mtime) ? mtime : 0 });
+      }
+    }
+    return out;
   }
 
   async backlinks(path: string): Promise<BacklinkEntry[]> {

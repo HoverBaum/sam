@@ -4,7 +4,6 @@ import { IndexProgressLine } from "../ui/IndexProgressLine.tsx";
 import type { RuntimeConfig } from "../config.ts";
 import type { CommandArgs, CommandContext } from "../types.ts";
 import { booleanFlag } from "../utils/args.ts";
-import { mapLimit } from "../utils/concurrency.ts";
 import { embed } from "../search/embed.ts";
 import {
   assertProfileMatch,
@@ -19,10 +18,7 @@ import {
   writeStore,
   type IndexManifest,
 } from "../search/index.ts";
-import { VaultClient } from "../vault/client.ts";
-
-/** Max concurrent Obsidian CLI processes during mtime scan (avoids fork bombs on large vaults). */
-const INDEX_OBSIDIAN_CONCURRENCY = 24;
+import { type FileStatEntry, VaultClient } from "../vault/client.ts";
 const DEFAULT_FAILURE_SAMPLE_LIMIT = 3;
 
 function ProgressView(props: { total: number; done: number; phase: string }) {
@@ -54,8 +50,8 @@ export interface IndexRunResult {
 
 interface IndexVaultClient {
   files(ext?: string): Promise<string[]>;
+  fileStats(paths: string[]): Promise<FileStatEntry[]>;
   read(path: string): Promise<string>;
-  eval(code: string): Promise<string>;
 }
 
 interface ExecuteIndexOptions {
@@ -148,15 +144,8 @@ export async function executeIndex(
 
   const pathTotal = Math.max(paths.length, 1);
   onProgress({ phase: "Checking file timestamps", done: 0, total: pathTotal });
-  let mtimeDone = 0;
-  const currentFiles = await mapLimit(paths, INDEX_OBSIDIAN_CONCURRENCY, async (path) => {
-    const code = `JSON.stringify(app.vault.getAbstractFileByPath(${JSON.stringify(path)})?.stat?.mtime ?? 0)`;
-    const mtimeText = await vault.eval(code);
-    const mtime = Number(mtimeText.replaceAll("\"", ""));
-    mtimeDone += 1;
-    onProgress({ done: mtimeDone, total: pathTotal });
-    return { path, mtime: Number.isFinite(mtime) ? mtime : 0 };
-  });
+  const currentFiles = await vault.fileStats(paths);
+  onProgress({ done: pathTotal, total: pathTotal });
 
   const staleness = classifyStaleness(rebuild ? null : existingManifest, currentFiles);
   const targets = rebuild ? currentFiles.map((f) => f.path) : [...staleness.newPaths, ...staleness.modifiedPaths];

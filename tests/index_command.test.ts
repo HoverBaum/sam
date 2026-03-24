@@ -48,11 +48,8 @@ async function withTempHome(fn: () => Promise<void>): Promise<void> {
   }
 }
 
-function mtimeEval(map: Record<string, number>) {
-  return async (code: string): Promise<string> => {
-    const entry = Object.entries(map).find(([path]) => code.includes(JSON.stringify(path)));
-    return JSON.stringify(entry?.[1] ?? 0);
-  };
+function fileStats(map: Record<string, number>) {
+  return async (paths: string[]) => paths.map((path) => ({ path, mtime: map[path] ?? 0 }));
 }
 
 Deno.test("executeIndex continues on embed errors for shell runs and preserves prior entries", async () => {
@@ -88,8 +85,8 @@ Deno.test("executeIndex continues on embed errors for shell runs and preserves p
         continueOnEmbedError: true,
         createVaultClient: () => ({
           files: async () => ["fresh.md", "stale.md"],
+          fileStats: fileStats({ "fresh.md": 20, "stale.md": 30 }),
           read: async (path: string) => path === "fresh.md" ? "fresh body" : "stale body",
-          eval: mtimeEval({ "fresh.md": 20, "stale.md": 30 }),
         }),
         embedText: async (_config, text) => {
           if (text === "stale body") {
@@ -130,8 +127,8 @@ Deno.test("executeIndex keeps blocking behavior by default", async () => {
           {
             createVaultClient: () => ({
               files: async () => ["broken.md", "ok.md"],
+              fileStats: fileStats({ "broken.md": 10, "ok.md": 10 }),
               read: async (path: string) => path,
-              eval: mtimeEval({ "broken.md": 10, "ok.md": 10 }),
             }),
             embedText: async (_config, text) => {
               if (text === "broken.md") {
@@ -148,6 +145,33 @@ Deno.test("executeIndex keeps blocking behavior by default", async () => {
 
     const activeDir = await resolveProfileDir(context.config, 768);
     assertEquals(await readManifest(activeDir), null);
+  });
+});
+
+Deno.test("executeIndex uses one batched fileStats lookup for staleness", async () => {
+  await withTempHome(async () => {
+    const context = testContext();
+    const calls: string[][] = [];
+
+    const result = await executeIndex(
+      context,
+      { flags: { "skip-embed": true }, positionals: [] },
+      () => {},
+      {
+        createVaultClient: () => ({
+          files: async () => ["a.md", "b.md", "c.md"],
+          fileStats: async (paths: string[]) => {
+            calls.push(paths);
+            return paths.map((path, index) => ({ path, mtime: index + 1 }));
+          },
+          read: async () => "body",
+        }),
+        now: () => 50,
+      },
+    );
+
+    assertEquals(result.indexedCount, 3);
+    assertEquals(calls, [["a.md", "b.md", "c.md"]]);
   });
 });
 
