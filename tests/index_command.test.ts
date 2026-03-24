@@ -104,6 +104,7 @@ Deno.test("executeIndex continues on embed errors for shell runs and preserves p
 
     assertEquals(result.indexedCount, 1);
     assertEquals(result.failedCount, 1);
+    assertEquals(result.emptySkippedCount, 0);
     assertEquals(result.deletedCount, 0);
     assertEquals(result.failureSamples.length, 1);
     assertEquals(result.failureSamples[0].path, "stale.md");
@@ -175,6 +176,7 @@ Deno.test("executeIndex uses one batched fileStats lookup for staleness", async 
     );
 
     assertEquals(result.indexedCount, 3);
+    assertEquals(result.emptySkippedCount, 0);
     assertEquals(calls, [["a.md", "b.md", "c.md"]]);
   });
 });
@@ -214,7 +216,44 @@ Deno.test("executeIndex limits concurrent embedding work to four notes", async (
     );
 
     assertEquals(result.indexedCount, 6);
+    assertEquals(result.emptySkippedCount, 0);
     assertEquals(maxInFlight, 4);
+  });
+});
+
+Deno.test("executeIndex skips empty files without embedding or failing", async () => {
+  await withTempHome(async () => {
+    const context = testContext();
+    let embedCalls = 0;
+
+    const result = await executeIndex(
+      context,
+      { flags: {}, positionals: [] },
+      () => {},
+      {
+        createVaultClient: () => ({
+          files: async () => ["empty.md", "ok.md"],
+          fileStats: fileStats({ "empty.md": 1, "ok.md": 2 }),
+          read: async (path: string) => path === "empty.md" ? "" : "hello",
+        }),
+        embedText: async (_config, text) => {
+          embedCalls += 1;
+          assertEquals(text, "hello");
+          return [1, 0];
+        },
+        now: () => 10,
+      },
+    );
+
+    assertEquals(embedCalls, 1);
+    assertEquals(result.indexedCount, 1);
+    assertEquals(result.emptySkippedCount, 1);
+    assertEquals(result.failedCount, 0);
+
+    const profileDir = await resolveProfileDir(context.config, 2);
+    const manifest = await readManifest(profileDir);
+    assertEquals(manifest?.files["ok.md"]?.indexedAt, 10);
+    assertEquals(manifest?.files["empty.md"], undefined);
   });
 });
 
@@ -224,6 +263,7 @@ Deno.test("indexShellMessages summarizes warnings and remaining failures", () =>
     indexedCount: 2,
     deletedCount: 1,
     failedCount: 3,
+    emptySkippedCount: 0,
     failureSamples: [
       { path: "a.md", message: "Skipped a.md: ollama returned no embedding vector." },
       { path: "b.md", message: "Skipped b.md: ollama could not return embeddings." },
@@ -237,5 +277,23 @@ Deno.test("indexShellMessages summarizes warnings and remaining failures", () =>
     "Skipped a.md: ollama returned no embedding vector.",
     "Skipped b.md: ollama could not return embeddings.",
     "1 more note was skipped during indexing.",
+  ]);
+});
+
+Deno.test("indexShellMessages reports empty skips alongside success", () => {
+  const result: IndexRunResult = {
+    totalFiles: 3,
+    indexedCount: 2,
+    deletedCount: 0,
+    failedCount: 0,
+    emptySkippedCount: 1,
+    failureSamples: [],
+    skipEmbed: false,
+    dryRun: false,
+  };
+
+  assertEquals(indexShellMessages(result), [
+    "Index run finished (2 indexed, 0 removed).",
+    "Skipped 1 empty note — it has no content to index.",
   ]);
 });

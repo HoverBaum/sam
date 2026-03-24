@@ -53,6 +53,7 @@ export interface IndexRunResult {
   indexedCount: number;
   deletedCount: number;
   failedCount: number;
+  emptySkippedCount: number;
   failureSamples: IndexFailure[];
   skipEmbed: boolean;
   dryRun: boolean;
@@ -84,7 +85,12 @@ interface IndexedTargetFailure {
   failure: IndexFailure;
 }
 
-type IndexedTargetResult = IndexedTargetSuccess | IndexedTargetFailure;
+interface IndexedTargetEmptySkip {
+  path: string;
+  skippedEmpty: true;
+}
+
+type IndexedTargetResult = IndexedTargetSuccess | IndexedTargetFailure | IndexedTargetEmptySkip;
 
 function errorMessage(error: unknown): string {
   return String((error as Error).message ?? error);
@@ -115,9 +121,19 @@ function formatEmbeddingFailure(config: RuntimeConfig, path: string, error: unkn
   return `Skipped ${path}: ${message}`;
 }
 
+function emptyNotesMessage(count: number): string {
+  return count === 1
+    ? "Skipped 1 empty note — it has no content to index."
+    : `Skipped ${count} empty notes — they have no content to index.`;
+}
+
 export function indexShellMessages(result: IndexRunResult): string[] {
+  const emptyNote = result.emptySkippedCount > 0 ? emptyNotesMessage(result.emptySkippedCount) : null;
+
   if (result.failedCount === 0) {
-    return [`Index run finished (${result.indexedCount} indexed, ${result.deletedCount} removed).`];
+    const lines = [`Index run finished (${result.indexedCount} indexed, ${result.deletedCount} removed).`];
+    if (emptyNote) lines.push(emptyNote);
+    return lines;
   }
 
   const messages = [
@@ -132,6 +148,7 @@ export function indexShellMessages(result: IndexRunResult): string[] {
         : `${remaining} more notes were skipped during indexing.`,
     );
   }
+  if (emptyNote) messages.push(emptyNote);
   return messages;
 }
 
@@ -171,6 +188,7 @@ export async function executeIndex(
       indexedCount: summary.indexedFiles,
       deletedCount: 0,
       failedCount: 0,
+      emptySkippedCount: 0,
       failureSamples: [],
       skipEmbed,
       dryRun: true,
@@ -197,6 +215,7 @@ export async function executeIndex(
   const failureSamples: IndexFailure[] = [];
   let failedCount = 0;
   let indexedCount = 0;
+  let emptySkippedCount = 0;
 
   const targetTotal = Math.max(targets.length, 1);
   onProgress(progressPatch(now, { phase: "Indexing notes", done: 0, total: targetTotal }));
@@ -204,6 +223,13 @@ export async function executeIndex(
   let completedTargets = 0;
   const targetResults = await mapLimit(targets, embedConcurrency, async (path): Promise<IndexedTargetResult> => {
     const content = await vault.read(path);
+
+    if (content.length === 0) {
+      completedTargets += 1;
+      onProgress({ done: completedTargets, total: targetTotal });
+      return { path, skippedEmpty: true };
+    }
+
     const contentHash = await hashContent(content);
 
     if (skipEmbed) {
@@ -234,6 +260,12 @@ export async function executeIndex(
   });
 
   for (const result of targetResults) {
+    if ("skippedEmpty" in result) {
+      emptySkippedCount += 1;
+      delete manifestFiles[result.path];
+      store.delete(result.path);
+      continue;
+    }
     if ("failure" in result) {
       failedCount += 1;
       if (failureSamples.length < maxFailureSamples) {
@@ -290,6 +322,7 @@ export async function executeIndex(
     indexedCount,
     deletedCount: staleness.deletedPaths.length,
     failedCount,
+    emptySkippedCount,
     failureSamples,
     skipEmbed,
     dryRun: false,
