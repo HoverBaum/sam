@@ -66,7 +66,7 @@ All reads and writes go through the official `obsidian` CLI (v1.12+). This keeps
 
 | Module                 | Responsibility                                                              |
 | ---------------------- | --------------------------------------------------------------------------- |
-| `cli.tsx`              | Entry point, command routing, global flags (`--dry-run`, `--model`) |
+| `cli.tsx`              | Entry point, command routing, global flags (`--dry-run`, `--model`)         |
 | `commands/new.tsx`     | Capture pipeline: ingest → structure → link → review → write                |
 | `commands/index.ts`    | Vault embedding indexer, watch mode                                         |
 | `commands/process.tsx` | Inbox processor: batch review of unprocessed notes                          |
@@ -77,7 +77,7 @@ All reads and writes go through the official `obsidian` CLI (v1.12+). This keeps
 | `ai/link.ts`           | AI: draft + related notes → wikilinks woven into body                       |
 | `search/embed.ts`      | ollama/nomic-embed wrapper                                                  |
 | `search/index.ts`      | vectra index: build, update, query                                          |
-| `vault/client.ts`      | Thin wrapper over `obsidian` CLI commands (CRUD, backlinks, links, orphans)  |
+| `vault/client.ts`      | Thin wrapper over `obsidian` CLI commands (CRUD, backlinks, links, orphans) |
 | `vault/read.ts`        | Direct fs reads for embedding pipeline only                                 |
 | `scripts/`             | Pure deterministic scripts (dedup, link rewrite, canonical, etc.)           |
 | `ui/ReviewScreen.tsx`  | Ink: show draft, accept/edit/discard                                        |

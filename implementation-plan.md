@@ -6,16 +6,16 @@
 
 ## Tech Stack
 
-| Layer | Choice | Reason |
-|---|---|---|
-| Runtime | **Deno** | First-class TypeScript, no `node_modules`, built-in permissions model |
-| Terminal UI | **Ink** (React for CLIs) | Interactive review screens, link pickers |
-| AI | **Pluggable provider** (`ai/provider.ts`) | Claude, OpenAI, Gemini, or any local model via OpenAI-compatible endpoint; selected by config or `--model` flag |
-| Embeddings | **ollama + nomic-embed-text** | Local, free, fast |
-| Vector index | **vectra** (JSON-backed) | Simple local index, no server needed |
-| Vault I/O | **obsidian CLI v1.12+** | Official interface; keeps sync/conflict handling in Obsidian |
-| Source fetching | **fetch + pdf-parse** | URL content and PDF text extraction |
-| Prompting | **Built-in prompts** (`ai/instructions.ts`) | Keep note-creation behavior versioned in product code for now |
+| Layer           | Choice                                      | Reason                                                                                                          |
+| --------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Runtime         | **Deno**                                    | First-class TypeScript, no `node_modules`, built-in permissions model                                           |
+| Terminal UI     | **Ink** (React for CLIs)                    | Interactive review screens, link pickers                                                                        |
+| AI              | **Pluggable provider** (`ai/provider.ts`)   | Claude, OpenAI, Gemini, or any local model via OpenAI-compatible endpoint; selected by config or `--model` flag |
+| Embeddings      | **ollama + nomic-embed-text**               | Local, free, fast                                                                                               |
+| Vector index    | **vectra** (JSON-backed)                    | Simple local index, no server needed                                                                            |
+| Vault I/O       | **obsidian CLI v1.12+**                     | Official interface; keeps sync/conflict handling in Obsidian                                                    |
+| Source fetching | **fetch + pdf-parse**                       | URL content and PDF text extraction                                                                             |
+| Prompting       | **Built-in prompts** (`ai/instructions.ts`) | Keep note-creation behavior versioned in product code for now                                                   |
 
 ---
 
