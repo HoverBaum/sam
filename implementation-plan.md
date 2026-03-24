@@ -34,7 +34,7 @@
 | Field        | Purpose |
 | ------------ | ------- |
 | `vault`      | Optional. Vault **name or id** string passed through to Obsidian as `vault=…` on every CLI invocation when set. Omit to rely on cwd / active vault. |
-| `vaultPath`  | Optional. Filesystem path to the vault root for `vault/read.ts` and indexing. If unset, use **current working directory** as vault root (matches Obsidian’s “cwd inside vault” behavior). |
+| `vaultPath`  | Optional. No longer used for direct filesystem reads — all vault I/O goes through the Obsidian CLI. Retained in config schema for potential future tooling; can be omitted. |
 | `model`      | Optional. Vercel AI SDK model id for chat/structure/link (see P0-3a). |
 | `apiKey`     | Optional. API key for the configured AI provider when required. |
 | `baseUrl`    | Optional. OpenAI-compatible base URL for chat models (e.g. local LM studio / Ollama OpenAI shim). |
@@ -66,7 +66,7 @@
 **Implementation notes:**
 
 - `vault/client.ts` builds each command line as: optional `vault=<resolved> ` prefix, then the Obsidian subcommand and parameters documented in the bundled CLI reference.
-- `vault/read.ts` (indexing) uses `vaultPath` from config when set; otherwise the vault root is the **current working directory** (same default idea as Obsidian: shell inside the vault folder).
+- All vault file I/O (including indexing) goes through `vault/client.ts` using `obsidian files`, `obsidian read`, `obsidian create`, etc. The `vaultPath` config field is no longer used for direct fs reads; it can be omitted unless needed for future tooling.
 
 ### Embedding configuration and index isolation
 
@@ -84,10 +84,9 @@ sam/
 ├── cli.tsx                   # Entry point, command routing
 ├── config.ts                 # Load ~/.sam/config.json; merge flags/env (vault, model, embedding*, …)
 ├── commands/
-│   ├── new.tsx               # Capture pipeline
-│   ├── index.ts              # Vault indexer + watch mode
-│   ├── process.tsx           # Inbox processor
-│   └── source.ts             # Source pipeline (URL / PDF)
+│   ├── new.tsx               # Capture pipeline (handles plain text, URL, file, $EDITOR)
+│   ├── index.ts              # Vault indexer with incremental manifest-based updates
+│   └── process.tsx           # Inbox processor
 ├── ai/
 │   ├── config.ts             # Model/API key selection and resolution
 │   ├── instructions.ts       # Built-in system prompts and prompt assembly
@@ -95,14 +94,12 @@ sam/
 │   └── link.ts               # AI: draft + candidates → wikilinks (generateText)
 ├── search/
 │   ├── embed.ts              # Embedding provider adapters (Ollama, OpenAI-compatible, …)
-│   └── index.ts              # vectra build / update / query (per embedding-profile path)
+│   └── index.ts              # vectra build / update / query; manifest-based incremental updates
 ├── vault/
-│   ├── client.ts             # Thin wrapper over obsidian CLI
-│   └── read.ts               # Direct fs reads (embedding pipeline only)
+│   └── client.ts             # Thin wrapper over obsidian CLI (all vault I/O goes through here)
 ├── scripts/
-│   ├── dedup.ts              # Detect duplicate sources (URL / file hash)
-│   ├── canonicalize.ts       # Rewrite vault links → canonical note
-│   └── link-rewrite.ts       # Bulk wikilink rewrite utility
+│   ├── dedup.ts              # Detect duplicate sources (URL / file hash); used internally by capture pipeline
+│   └── canonicalize.ts       # Canonical note management; delegates link updates to obsidian rename/move
 ├── ui/
 │   ├── Shell.tsx             # Ink: default home — greeting, input, slash routing (/new, …)
 │   ├── ReviewScreen.tsx      # Ink: show draft, accept / edit / discard
@@ -140,7 +137,7 @@ sam/
 - [ ] Typed return values; throw on non-zero exit; **normalize** Obsidian CLI `format=json` output into stable TypeScript types (`BacklinkEntry`, `LinkEntry`, …) so callers do not depend on raw CLI field-name drift—document expected shapes next to types.
 
 #### P0-3a: `ai/config.ts` + embedding resolution (shared `config`)
-- [ ] Define config shape aligned with `~/.sam/config.json`: chat fields `{ model, apiKey?, baseUrl?, vault?, vaultPath? }` plus embedding fields `{ embeddingModel?, embeddingProvider?, embeddingBaseUrl?, embeddingApiKey? }` (shared `config` module for `vault/client.ts`, `vault/read.ts`, `ai/config.ts`, and `search/embed.ts`)
+- [ ] Define config shape aligned with `~/.sam/config.json`: chat fields `{ model, apiKey?, baseUrl?, vault?, vaultPath? }` plus embedding fields `{ embeddingModel?, embeddingProvider?, embeddingBaseUrl?, embeddingApiKey? }` (shared `config` module for `vault/client.ts`, `ai/config.ts`, and `search/embed.ts`)
 - [ ] **Chat** model selection order: `--model` → `SAM_AI_MODEL` → config → default (`anthropic/claude-3-5-sonnet-20241022`)
 - [ ] **Embedding** selection order: `--embed-model` (plus embedding env vars) → config → default (Ollama + `nomic-embed-text`); see [Embedding configuration](#embedding-configuration-and-index-isolation)
 - [ ] Support Vercel AI SDK model IDs: `anthropic/claude-*`, `openai/*`, `google/*`, `mistral/*`, `groq/*`, etc.
@@ -155,12 +152,14 @@ sam/
 - [ ] Return prompt fragments/helpers that `ai/structure.ts` and `ai/link.ts` can reuse
 
 #### P0-4: `sam index` command (`commands/index.ts`)
-- [ ] Walk vault directory via `vault/read.ts` (same vault path rules as [Configuration and vault resolution](#configuration-and-vault-resolution))
+- [ ] List vault markdown files via `obsidian files ext=md` (same vault resolution as [Configuration and vault resolution](#configuration-and-vault-resolution)); read each file's content via `obsidian read path=<path>` — **no direct filesystem reads**; all vault I/O goes through `vault/client.ts`
 - [ ] Embed each note with `search/embed.ts` using the **resolved embedding provider** (not hard-coded Ollama)
 - [ ] Upsert into `search/index.ts` (vectra JSON index under `~/.sam/index/<embedding-profile>/`; metadata includes note path, title/summary for retrieval)
-- [ ] `--skip-embed`: update metadata / file list only without calling the embedding backend (supports offline or missing API keys; pairs with [Error handling](#error-handling))
-- [ ] `--watch` flag: file-system watcher re-indexes on change (debounce rapid saves to avoid thrashing on large vaults)
-- [ ] Progress bar via Ink; respect `--dry-run` (report what would be indexed)
+- [ ] **Manifest:** after each run, write/update `~/.sam/index/<embedding-profile>/manifest.json` with shape `{ profile: { provider, model, dimensions }, files: { [vaultPath]: { contentHash, indexedAt } } }`; on subsequent runs, **only re-embed files whose `contentHash` has changed**; remove entries for deleted paths; add new paths — never do a full re-embed unless `--rebuild` is passed
+- [ ] **Profile staleness guard:** before any index query, if the resolved embedding config does not match `manifest.profile`, refuse to use the index and tell the user to run `sam index --rebuild`; never silently query an index built with different provider/model/dimensions
+- [ ] `--skip-embed`: update the manifest file list (new/deleted paths) without calling the embedding backend; useful offline or when API key is unavailable
+- [ ] `--rebuild`: force full re-embed of all files regardless of manifest state (required after provider/model change)
+- [ ] Progress bar via Ink; respect `--dry-run` (report what would be indexed, no writes)
 
 **Note:** `search/embed.ts` and `search/index.ts` are implemented here first; Phase 1 **reuses** these modules for `sam new` (no second implementation). P1-3 is “capture pipeline uses the shared search API,” not a duplicate embed layer.
 
@@ -170,6 +169,7 @@ Aligned with [Vision.md — Experience and interactivity](./Vision.md#experience
 
 - [ ] **`ui/Shell.tsx`:** Ink UI that **greets** the user (short welcome + hint line for help)
 - [ ] **Slash-style routing:** e.g. user types **`/new`** (plus optional args) → run the same flow as `sam new` with parsed remainder; design for adding more routes later (`/index`, …)
+- [ ] **Startup index check:** on launch, call `obsidian eval` to get all markdown file paths + modification times in a single round-trip (see [Index staleness check](#index-staleness-check)); compare against the embedding manifest; if any files are new, modified, or deleted since the last index run, display a soft prompt: _"N notes changed since last index — run `sam index` to update"_ — proceed without blocking; log a warning before any search-based operation if the index is known-stale
 - [ ] **Responsiveness:** avoid blocking the React/Ink tree on long I/O where possible (spinner/async state); keep input feedback snappy—users expect **highly responsive** TUIs
 - [ ] **Subcommands unchanged:** `sam new`, `sam index`, … remain the scriptable/automation path; the shell is the discoverable default
 - [ ] Stub routes are acceptable until Phase 1 lands; wire **`/new`** to `commands/new.tsx` when P1-6 exists
@@ -184,9 +184,10 @@ Aligned with [Vision.md — Experience and interactivity](./Vision.md#experience
 
 #### P1-1: Input ingestion
 - [ ] Plain text argument: pass through directly
-- [ ] `--url <url>`: fetch HTML → extract readable text (pin a concrete library—e.g. `@mozilla/readability` + `jsdom` or Deno-documented equivalent—and document charset/base-URL behavior)
-- [ ] `--file <path>`: detect PDF vs plain text; extract accordingly (`pdf-parse` or Deno-viable alternative; note any Deno/npm permission requirements in `deno.json`)
+- [ ] `--url <url>`: fetch HTML → extract readable text (pin a concrete library—e.g. `@mozilla/readability` + `jsdom` or Deno-documented equivalent—and document charset/base-URL behavior); **before fetching**, run dedup check (see P2-1) — if a note with a matching `source:` property already exists, route to canonicalize flow (P2-2) and skip the full capture pipeline
+- [ ] `--file <path>`: detect PDF vs plain text; extract accordingly (`pdf-parse` or Deno-viable alternative; note any Deno/npm permission requirements in `deno.json`); **before extracting**, run dedup check against `file-hash` front matter
 - [ ] No argument: spawn `$EDITOR` with a temp file; on close, read buffer; **empty or unchanged** buffer → cancel with a clear message (see [Error handling](#error-handling))
+- [ ] **Source metadata:** when a URL or file source is provided, attach to the normalized result so downstream steps can write it to front matter: `source: <url-or-filepath>` property and `#source` tag added to the note's tag list; this is the only mechanism for dedup detection — no separate source copy is stored
 - [ ] Return normalized `{ rawContent: string, sourceUrl?: string, sourceFile?: string }`
 
 #### P1-2: `ai/structure.ts` — structure raw input
@@ -222,37 +223,31 @@ Aligned with [Vision.md — Experience and interactivity](./Vision.md#experience
 
 ---
 
-## Phase 2 — Source Pipeline (`sam source`)
+## Phase 2 — Source Deduplication and Canonicalization (internal, within capture pipeline)
 
-**Goal:** URL/PDF sources with deduplication and canonical note management.
+**Goal:** When a URL or file source is provided to `sam new`, handle duplicates gracefully and maintain a canonical note for the topic. There is no separate `sam source` command — all of this is internal pipeline logic triggered by the presence of a source.
 
 ### Tasks
 
 #### P2-1: `scripts/dedup.ts` — duplicate detection
-- [ ] For URLs: normalize URL (document normalization—scheme/host/path, strip fragments); search vault YAML front matter for a **`source`** key matching that URL (string)
-- [ ] For files: SHA-256 hash (hex), search front matter for **`file-hash`** matching that digest
+- [ ] For URLs: normalize URL (document normalization—scheme/host/path, strip fragments); use `obsidian search query="<normalized-url>"` to find notes containing the URL, then confirm via `obsidian property:read name=source` on candidates to verify a `source:` front matter match
+- [ ] For files: SHA-256 hash (hex); search for notes with a matching `file-hash:` front matter property via the same search + property read pattern
 - [ ] Return `{ isDuplicate: boolean, existingNote?: string }`
-- [ ] Pure script — no AI
+- [ ] Pure script — no AI; called from P1-1 before fetching/extracting content
 
 #### P2-2: `scripts/canonicalize.ts` — canonical note management
-- [ ] Given `oldNote` and `canonicalNote` paths:
-  1. Create or update canonical note with links to both versions
-  2. Append `canonical: [[Canonical Note Title]]` to old note front matter
-  3. Delegate link rewriting to `scripts/link-rewrite.ts`
-- [ ] `--dry-run`: show all changes without applying
-- [ ] Supports `--source` and `--canonical` flags as described in Vision.md
+- [ ] Given `existingNote` and the incoming source (same URL or file):
+  1. Surface the existing note to the user in the ReviewScreen with a prompt: "A note from this source already exists — create a new version and link them, or discard?"
+  2. If the user proceeds: create the new note normally, then use `obsidian property:set name=canonical` on the old note to record the relationship, and `obsidian property:set name=also-see` on the new note linking back
+  3. **Link updates:** use `obsidian rename name=<new-name>` or `obsidian move to=<path>` when a note is renamed or relocated — Obsidian automatically updates all internal links when "Automatically update internal links" is on in vault settings; **do not implement a custom link-rewriting pass**
+- [ ] `--dry-run`: show what would change without applying
+- [ ] After any rename/move: call `vault/client.ts unresolved()` to verify no new broken links were introduced
 
-#### P2-3: `scripts/link-rewrite.ts` — bulk wikilink rewrite
-- [ ] Walk all vault `.md` files
-- [ ] Replace `[[old-title]]` with `[[new-title]]` everywhere
-- [ ] Use `vault/client.ts unresolved()` after rewrite to verify no new broken links were introduced
-- [ ] Pure regex/AST script; no AI
-
-#### P2-4: Wire `commands/source.ts`
-- [ ] Run dedup check first
-- [ ] If duplicate → run canonicalize flow
-- [ ] If new → run standard capture pipeline (reuse Phase 1 modules)
-- [ ] `--relates-to` flag: inject context into structure prompt
+#### P2-3: Wire dedup + canonicalize into `commands/new.tsx`
+- [ ] When `--url` or `--file` is provided, P1-1 calls `scripts/dedup.ts` before the full pipeline
+- [ ] If duplicate found → call `scripts/canonicalize.ts` flow (user confirms or discards)
+- [ ] If new → proceed with capture pipeline as normal; source metadata (`source:` property + `#source` tag) is written to the note's front matter on accept
+- [ ] `--relates-to <note>`: inject the referenced note's title/summary into the structure prompt as additional context
 
 ---
 
@@ -310,10 +305,22 @@ Every command that modifies the vault must:
 2. Format output as the canonical dry-run block ([Vision.md](./Vision.md)); keep the example in Vision and implementation in lockstep—if the format changes, update both
 3. Exit 0 without touching the vault
 
+### Index staleness check
+
+Before any command that queries the vector index (e.g. `sam new`, the shell's startup), `search/index.ts` must check whether the index is current:
+
+1. Call `obsidian eval code="JSON.stringify(app.vault.getMarkdownFiles().map(f=>({path:f.path,mtime:f.stat.mtime})))"` — returns all vault markdown files with their modification times in **one round-trip**.
+2. Load `~/.sam/index/<embedding-profile>/manifest.json`; for each file, compare its `mtime` against `manifest.files[path].indexedAt`.
+3. Classify files as: **new** (not in manifest), **modified** (`mtime > indexedAt`), **deleted** (in manifest but not in vault listing), or **current**.
+4. If any files fall outside "current": surface the count as a non-blocking hint (in the shell) or a warning line (in subcommand output); do **not** abort the current operation — stale results are acceptable; missing results are acceptable; silent wrong results are not.
+5. The profile staleness guard (from P0-4) runs first: if `manifest.profile` mismatches config, warn and skip the query entirely rather than returning dimensionally-incompatible results.
+
+This approach costs **one** CLI invocation regardless of vault size, keeps `sam` fast to open, and avoids a background file-watcher process.
+
 ### Error handling
 - Obsidian CLI not found → clear install instructions (see [Obsidian CLI docs](./external-docs/Obsidian-cli-docs.md) — install, PATH, Obsidian must be running)
 - Embedding backend unreachable (Ollama down, API error, wrong `embeddingBaseUrl`) → name the provider and suggest fixes; suggest `sam index --skip-embed` when vectors are optional
-- AI provider not reachable / bad API key → surface message, show which provider is configured, offer retry or `--discard`
+- AI provider not reachable / bad API key → surface message, show which provider is configured, offer retry or cancel
 - Network fetch failures (`--url`) → clear error with URL; enforce documented **timeouts** and **max body size** (see Security)
 - Empty or unchanged `$EDITOR` buffer → treat as cancel or validation error with a clear message
 
@@ -321,7 +328,7 @@ Every command that modifies the vault must:
 URL and PDF ingestion processes **untrusted** content. For v1: define and document **defaults** for max response/PDF bytes and fetch timeouts (env overrides optional); avoid executing or interpreting HTML beyond readability extraction. Prefer failing closed with a readable error over silent truncation where safety is ambiguous.
 
 ### Testing strategy
-- **Unit tests:** `scripts/` modules (dedup, canonicalize, link-rewrite) — pure functions
+- **Unit tests:** `scripts/` modules (dedup, canonicalize) — pure functions
 - **Contract / integration tests:** `vault/client.ts` — parse JSON output from recorded `obsidian` invocations (or a test double) for `backlinks`, `links`, `unresolved`, etc.
 - **Integration tests:** `ai/structure.ts` and `ai/link.ts` with **mocked** provider responses (golden outputs) so prompts and schema stay stable
 - **Integration tests:** capture pipeline end-to-end with fixture vault and mocked AI + **mocked embedding provider** (no requirement on live Ollama in CI)
@@ -347,14 +354,14 @@ See [Vision.md — Experience and interactivity](./Vision.md#experience-and-inte
 | ----- | --------- |
 | **P0** | `sam` opens Ink home shell with welcome + routing stub; `sam index` runs from a vault cwd; Obsidian commands succeed with resolved `vault=` when configured; chat and **embedding** settings resolve from flags/env/config; index writes use an **embedding-profile** path; `deno check` clean |
 | **P1** | Raw input → structured draft → related notes → wikilink suggestions → user accept creates a note in the vault; **`/new`** (home shell) and **`sam new`** both work; dry-run matches Vision |
-| **P2** | Duplicate source/file routes to canonicalize + link rewrite without breaking links; new sources reuse capture pipeline |
+| **P2** | Duplicate URL/file source detected before fetch, routes to canonicalize flow; new sources write `source:` front matter + `#source` tag; `obsidian rename`/`move` used for any renames (no broken links) |
 | **P3** | At least one queue type processes items through the Phase 1 pipeline and moves completed work out of the queue |
 
 ---
 
 ## Performance and scale
 
-For large vaults, full embedding on every change is expensive. **`--watch`** should debounce file events. Longer term, incremental or dirty-only re-indexing may be needed; not required for v1 beyond debouncing and clear progress reporting.
+For large vaults, incremental re-indexing is handled by the manifest (only re-embed files whose content hash changed). The startup staleness check costs one `obsidian eval` call regardless of vault size. Longer term, reading individual files via `obsidian read` for large vaults (hundreds+ notes) may be slow; batching or caching strategies may be needed but are not required for v1.
 
 ---
 
@@ -365,7 +372,7 @@ P0-1 → P0-2 → P0-3a → P0-3b → P0-4 → P0-5   (Foundation + interactive 
          ↓
 P1-1 → P1-2 → P1-3 → P1-4 → P1-5 → P1-6   (Capture — core daily-use command)
          ↓
-P2-1 → P2-2 → P2-3 → P2-4   (Source — dedup + canonicalize)
+P2-1 → P2-2 → P2-3   (Dedup + canonicalize — wired into capture pipeline)
          ↓
 P3-1 → P3-2 → P3-3 → P3-4   (Intake queues)
 ```
