@@ -11,11 +11,13 @@
 | Runtime         | **Deno**                                    | First-class TypeScript, no `node_modules`, built-in permissions model                                                                                                   |
 | Terminal UI     | **Ink** (React for CLIs)                    | **Home shell** (welcome + routing), review screens, link pickers; aim for a **highly responsive** TUI—see [Interactive shell and TUI](#interactive-shell-and-tui-experience) |
 | AI              | **Vercel AI SDK** (`ai` on npm + `@ai-sdk/*` providers) | Unified provider abstraction (Claude, OpenAI, Gemini, Groq, Mistral, etc.); `generateObject` / `generateText`, streaming, tool calling; selected by config or `--model` flag |
-| Embeddings      | **ollama + nomic-embed-text**               | Local, free, fast                                                                                                                                                       |
-| Vector index    | **vectra** (JSON-backed)                    | Simple local index, no server needed                                                                                                                                    |
+| Embeddings      | **Pluggable providers** (default: **Ollama** + `nomic-embed-text`) | Users pick local **Ollama**, **OpenAI**-style HTTP APIs, or other OpenAI-compatible endpoints; same interface from `search/embed.ts`—see [Embedding configuration](#embedding-configuration-and-index-isolation) |
+| Vector index    | **vectra** (JSON-backed)                    | Simple local index, no server needed; **one index directory per embedding profile** so dimensions/providers never mix silently                                                                                                        |
 | Vault I/O       | **Obsidian CLI** (Obsidian 1.12+ installer) | Official interface; keeps sync/conflict handling in Obsidian. Command reference: [Obsidian CLI (bundled)](./external-docs/Obsidian-cli-docs.md)                          |
 | Source fetching | **fetch + pdf-parse**                       | URL content and PDF text extraction                                                                                                                                     |
 | Prompting       | **Built-in prompts** (`ai/instructions.ts`) | Keep note-creation behavior versioned in product code for now                                                                                                           |
+
+**Documentation pointers (keep in sync while building):** [Deno — npm packages](https://docs.deno.com/runtime/fundamentals/node_modules/) · [Vercel AI SDK](https://sdk.vercel.ai/docs) · [Ink](https://github.com/vadimdemedes/ink) · [vectra](https://github.com/nicklockwood/vectra) · [Ollama API](https://github.com/ollama/ollama/blob/main/docs/api.md) · [OpenAI Embeddings](https://platform.openai.com/docs/guides/embeddings) (for API-style providers)
 
 ---
 
@@ -33,7 +35,26 @@
 | ------------ | ------- |
 | `vault`      | Optional. Vault **name or id** string passed through to Obsidian as `vault=…` on every CLI invocation when set. Omit to rely on cwd / active vault. |
 | `vaultPath`  | Optional. Filesystem path to the vault root for `vault/read.ts` and indexing. If unset, use **current working directory** as vault root (matches Obsidian’s “cwd inside vault” behavior). |
-| (same file)  | AI defaults from P0-3a: `model`, `apiKey`, `baseUrl`, etc. |
+| `model`      | Optional. Vercel AI SDK model id for chat/structure/link (see P0-3a). |
+| `apiKey`     | Optional. API key for the configured AI provider when required. |
+| `baseUrl`    | Optional. OpenAI-compatible base URL for chat models (e.g. local LM studio / Ollama OpenAI shim). |
+| `embeddingModel` | Optional. Model id for vectors (meaning depends on provider—e.g. Ollama tag vs OpenAI embedding model name). |
+| `embeddingProvider` | Optional. Discriminator when needed: e.g. `ollama` \| `openai` \| `openai-compatible`. If omitted, infer from `embeddingBaseUrl` / `embeddingModel` heuristics. |
+| `embeddingBaseUrl` | Optional. Ollama base (default `http://127.0.0.1:11434`) or OpenAI-compatible embeddings endpoint. |
+| `embeddingApiKey` | Optional. For cloud/API embedding providers. |
+
+**Minimal example (illustrative—not every field required):**
+
+```json
+{
+  "vault": "Notes",
+  "vaultPath": "/Users/me/obsidian/Notes",
+  "model": "anthropic/claude-3-5-sonnet-20241022",
+  "embeddingProvider": "ollama",
+  "embeddingModel": "nomic-embed-text",
+  "embeddingBaseUrl": "http://127.0.0.1:11434"
+}
+```
 
 **Resolution order for the vault argument** (most specific wins):
 
@@ -47,6 +68,13 @@
 - `vault/client.ts` builds each command line as: optional `vault=<resolved> ` prefix, then the Obsidian subcommand and parameters documented in the bundled CLI reference.
 - `vault/read.ts` (indexing) uses `vaultPath` from config when set; otherwise the vault root is the **current working directory** (same default idea as Obsidian: shell inside the vault folder).
 
+### Embedding configuration and index isolation
+
+- **Pluggable backends** in `search/embed.ts`: at minimum **Ollama** (REST `/api/embeddings`) and **OpenAI-compatible** HTTPS endpoints that accept an embeddings request with API key when needed. Same exported `embed(text): Promise<number[]>` for `sam index` and capture (P1-3).
+- **Resolution order** for embedding settings (most specific wins), analogous to chat model resolution: `--embed-model` (and embedding-specific flags if any) → `SAM_EMBED_MODEL` / `SAM_EMBED_BASE_URL` / `SAM_EMBED_API_KEY` as applicable → `~/.sam/config.json` → **defaults** (Ollama + `nomic-embed-text` at the default Ollama host).
+- **Index path:** store vectra data under `~/.sam/index/<embedding-profile>/`, where `embedding-profile` is a stable id derived from **provider + model + vector dimension** (e.g. hash or slug). Changing provider/model must **not** silently reuse an index built with different dimensions—either re-embed into a new profile directory or explicit `sam index --rebuild` (exact flag name TBD).
+- **Switching providers** is a first-class user choice (local free vs cloud quality/latency); document tradeoffs in README.
+
 ---
 
 ## Repository Layout
@@ -54,7 +82,7 @@
 ```
 sam/
 ├── cli.tsx                   # Entry point, command routing
-├── config.ts                 # Load ~/.sam/config.json; merge flags/env (vault, model, …)
+├── config.ts                 # Load ~/.sam/config.json; merge flags/env (vault, model, embedding*, …)
 ├── commands/
 │   ├── new.tsx               # Capture pipeline
 │   ├── index.ts              # Vault indexer + watch mode
@@ -66,8 +94,8 @@ sam/
 │   ├── structure.ts          # AI: raw input → Zettel draft (generateObject)
 │   └── link.ts               # AI: draft + candidates → wikilinks (generateText)
 ├── search/
-│   ├── embed.ts              # ollama nomic-embed wrapper
-│   └── index.ts              # vectra build / update / query
+│   ├── embed.ts              # Embedding provider adapters (Ollama, OpenAI-compatible, …)
+│   └── index.ts              # vectra build / update / query (per embedding-profile path)
 ├── vault/
 │   ├── client.ts             # Thin wrapper over obsidian CLI
 │   └── read.ts               # Direct fs reads (embedding pipeline only)
@@ -94,7 +122,7 @@ sam/
 #### P0-1: Project scaffold
 - [ ] `deno.json` with tasks: `dev`, `build`, `test`
 - [ ] Import map pointing to npm specifiers for `ai`, `@ai-sdk/*` providers, Ink, and other deps as needed
-- [ ] `cli.tsx` entry with global flags: `--dry-run`, `--model`, `--vault` (see [Configuration and vault resolution](#configuration-and-vault-resolution))
+- [ ] `cli.tsx` entry with global flags: `--dry-run`, `--model`, `--vault`, `--embed-model` (and env counterparts for embeddings—see [Embedding configuration](#embedding-configuration-and-index-isolation))
 - [ ] Load and merge `~/.sam/config.json` (create schema with defaults for missing keys)
 - [ ] **Routing:** `sam <subcommand>` dispatches to commands; `sam` with no subcommand opens the **interactive shell** ([P0-5](#p0-5-interactive-shell-ink-home))
 - [ ] Compile check passes (`deno check`)
@@ -109,14 +137,16 @@ sam/
   - `orphans(): Promise<string[]>` — notes with no incoming links
   - `deadends(): Promise<string[]>` — notes with no outgoing links
 - [ ] Accept `--dry-run`: log intended command, skip execution
-- [ ] Typed return values; throw on non-zero exit
+- [ ] Typed return values; throw on non-zero exit; **normalize** Obsidian CLI `format=json` output into stable TypeScript types (`BacklinkEntry`, `LinkEntry`, …) so callers do not depend on raw CLI field-name drift—document expected shapes next to types.
 
-#### P0-3a: `ai/config.ts` — AI model selection
-- [ ] Define config shape aligned with `~/.sam/config.json`: `{ model: string, apiKey?: string, baseUrl?: string, vault?: string, vaultPath?: string }` (shared `config` module for `vault/client.ts`, `vault/read.ts`, and `ai/config.ts`)
-- [ ] Model selection order: `--model` flag → `SAM_AI_MODEL` env var → `~/.sam/config.json` → default (`anthropic/claude-3-5-sonnet-20241022`)
+#### P0-3a: `ai/config.ts` + embedding resolution (shared `config`)
+- [ ] Define config shape aligned with `~/.sam/config.json`: chat fields `{ model, apiKey?, baseUrl?, vault?, vaultPath? }` plus embedding fields `{ embeddingModel?, embeddingProvider?, embeddingBaseUrl?, embeddingApiKey? }` (shared `config` module for `vault/client.ts`, `vault/read.ts`, `ai/config.ts`, and `search/embed.ts`)
+- [ ] **Chat** model selection order: `--model` → `SAM_AI_MODEL` → config → default (`anthropic/claude-3-5-sonnet-20241022`)
+- [ ] **Embedding** selection order: `--embed-model` (plus embedding env vars) → config → default (Ollama + `nomic-embed-text`); see [Embedding configuration](#embedding-configuration-and-index-isolation)
 - [ ] Support Vercel AI SDK model IDs: `anthropic/claude-*`, `openai/*`, `google/*`, `mistral/*`, `groq/*`, etc.
-- [ ] For local models: support OpenAI-compatible baseUrl endpoint (e.g., `baseUrl: "http://localhost:11434"`)
+- [ ] For local chat models: support OpenAI-compatible `baseUrl` (e.g., LM Studio); distinct from `embeddingBaseUrl` when both are set
 - [ ] All `ai/` modules import from the `ai` package and provider packages (`@ai-sdk/anthropic`, …) only through a thin layer in `ai/config.ts` where practical; avoid scattering provider SDK imports
+- [ ] `search/embed.ts`: implement provider adapters and route by resolved embedding config; **no** duplicate embed stacks in Phase 1
 
 #### P0-3b: `ai/instructions.ts` — built-in prompt assembly
 - [ ] Define the core system prompt for note structuring and link-weaving
@@ -126,9 +156,9 @@ sam/
 
 #### P0-4: `sam index` command (`commands/index.ts`)
 - [ ] Walk vault directory via `vault/read.ts` (same vault path rules as [Configuration and vault resolution](#configuration-and-vault-resolution))
-- [ ] Embed each note with `search/embed.ts` (ollama `nomic-embed-text`)
-- [ ] Upsert into `search/index.ts` (vectra JSON index, stored in `~/.sam/index/`)
-- [ ] `--skip-embed`: update metadata / file list only without calling ollama (supports machines without local embeddings; pairs with [Error handling](#error-handling))
+- [ ] Embed each note with `search/embed.ts` using the **resolved embedding provider** (not hard-coded Ollama)
+- [ ] Upsert into `search/index.ts` (vectra JSON index under `~/.sam/index/<embedding-profile>/`; metadata includes note path, title/summary for retrieval)
+- [ ] `--skip-embed`: update metadata / file list only without calling the embedding backend (supports offline or missing API keys; pairs with [Error handling](#error-handling))
 - [ ] `--watch` flag: file-system watcher re-indexes on change (debounce rapid saves to avoid thrashing on large vaults)
 - [ ] Progress bar via Ink; respect `--dry-run` (report what would be indexed)
 
@@ -154,9 +184,9 @@ Aligned with [Vision.md — Experience and interactivity](./Vision.md#experience
 
 #### P1-1: Input ingestion
 - [ ] Plain text argument: pass through directly
-- [ ] `--url <url>`: fetch HTML → extract readable text (Mozilla Readability or similar)
-- [ ] `--file <path>`: detect PDF vs plain text; extract accordingly
-- [ ] No argument: spawn `$EDITOR`, read result on close
+- [ ] `--url <url>`: fetch HTML → extract readable text (pin a concrete library—e.g. `@mozilla/readability` + `jsdom` or Deno-documented equivalent—and document charset/base-URL behavior)
+- [ ] `--file <path>`: detect PDF vs plain text; extract accordingly (`pdf-parse` or Deno-viable alternative; note any Deno/npm permission requirements in `deno.json`)
+- [ ] No argument: spawn `$EDITOR` with a temp file; on close, read buffer; **empty or unchanged** buffer → cancel with a clear message (see [Error handling](#error-handling))
 - [ ] Return normalized `{ rawContent: string, sourceUrl?: string, sourceFile?: string }`
 
 #### P1-2: `ai/structure.ts` — structure raw input
@@ -167,14 +197,14 @@ Aligned with [Vision.md — Experience and interactivity](./Vision.md#experience
 
 #### P1-3: `search/embed.ts` + `search/index.ts` (consumption in capture)
 - [ ] Consume the **shared** modules from P0-4 (implement there first; no parallel embed stack)
-- [ ] `embed(text: string): Promise<number[]>` — POST to local ollama endpoint
-- [ ] `query(vector: number[], topN: number): Promise<{ id, title, summary, score }[]>` — cosine search vectra
+- [ ] `embed(text: string): Promise<number[]>` — resolved embedding provider (Ollama, OpenAI-compatible, etc.—same as `sam index`)
+- [ ] `query(vector: number[], topN: number): Promise<{ id, title, summary, score }[]>` — cosine search against the **current** embedding-profile index
 - [ ] `upsert(id, vector, metadata)` — add/update note in index
 
 #### P1-4: `ai/link.ts` — weave wikilinks
 - [ ] **Depends on P1-3:** embed/query the draft (or its title) to retrieve top-N candidates before linking
 - [ ] Input: `ZettelDraft` + top-N related note titles/summaries
-- [ ] Also fetch `backlinks` of each candidate note — notes that already link to a candidate are stronger signals
+- [ ] Enrich with `backlinks` per candidate **only for the top-K candidates** (K ≤ N; same order of magnitude)—avoid unbounded Obsidian CLI calls on large candidate lists
 - [ ] Call `generateText()` from the `ai` package (via resolved model from `ai/config.ts`) to naturally insert `[[wikilinks]]` where appropriate
 - [ ] Return updated draft body; do not invent links not in the candidate list
 
@@ -199,8 +229,8 @@ Aligned with [Vision.md — Experience and interactivity](./Vision.md#experience
 ### Tasks
 
 #### P2-1: `scripts/dedup.ts` — duplicate detection
-- [ ] For URLs: normalize URL, search vault front matter for matching `source:` field
-- [ ] For files: SHA-256 hash, search vault front matter for matching `file-hash:` field
+- [ ] For URLs: normalize URL (document normalization—scheme/host/path, strip fragments); search vault YAML front matter for a **`source`** key matching that URL (string)
+- [ ] For files: SHA-256 hash (hex), search front matter for **`file-hash`** matching that digest
 - [ ] Return `{ isDuplicate: boolean, existingNote?: string }`
 - [ ] Pure script — no AI
 
@@ -277,28 +307,28 @@ If we later package `sam` as a skill or skill-building tool, use these constrain
 ### `--dry-run` contract
 Every command that modifies the vault must:
 1. Accept `--dry-run` at the global CLI level
-2. Format output as the canonical dry-run block (see Vision.md)
+2. Format output as the canonical dry-run block ([Vision.md](./Vision.md)); keep the example in Vision and implementation in lockstep—if the format changes, update both
 3. Exit 0 without touching the vault
 
 ### Error handling
 - Obsidian CLI not found → clear install instructions (see [Obsidian CLI docs](./external-docs/Obsidian-cli-docs.md) — install, PATH, Obsidian must be running)
-- ollama not running → explain how to start; suggest `sam index --skip-embed` when embeddings are optional
+- Embedding backend unreachable (Ollama down, API error, wrong `embeddingBaseUrl`) → name the provider and suggest fixes; suggest `sam index --skip-embed` when vectors are optional
 - AI provider not reachable / bad API key → surface message, show which provider is configured, offer retry or `--discard`
-- Network fetch failures (`--url`) → clear error with URL; optional timeouts and size limits (see Security)
+- Network fetch failures (`--url`) → clear error with URL; enforce documented **timeouts** and **max body size** (see Security)
 - Empty or unchanged `$EDITOR` buffer → treat as cancel or validation error with a clear message
 
 ### Security (untrusted input)
-URL and PDF ingestion processes **untrusted** content. For v1: enforce reasonable **size limits** (response body, PDF bytes), **timeouts** on fetch, and avoid executing or interpreting HTML beyond readability extraction. Prefer failing closed with a readable error over silent truncation where safety is ambiguous.
+URL and PDF ingestion processes **untrusted** content. For v1: define and document **defaults** for max response/PDF bytes and fetch timeouts (env overrides optional); avoid executing or interpreting HTML beyond readability extraction. Prefer failing closed with a readable error over silent truncation where safety is ambiguous.
 
 ### Testing strategy
 - **Unit tests:** `scripts/` modules (dedup, canonicalize, link-rewrite) — pure functions
 - **Contract / integration tests:** `vault/client.ts` — parse JSON output from recorded `obsidian` invocations (or a test double) for `backlinks`, `links`, `unresolved`, etc.
 - **Integration tests:** `ai/structure.ts` and `ai/link.ts` with **mocked** provider responses (golden outputs) so prompts and schema stay stable
-- **Integration tests:** capture pipeline end-to-end with fixture vault and mocked AI + ollama
+- **Integration tests:** capture pipeline end-to-end with fixture vault and mocked AI + **mocked embedding provider** (no requirement on live Ollama in CI)
 - **Manual smoke test** checklist per phase before moving to next
 
 ### CI
-Run `deno task test` and `deno check` on every push/PR (exact CI product optional; minimum bar is scripted locally or in CI).
+Minimum: on every push/PR run `deno task test` and `deno check` (e.g. GitHub Actions workflow in-repo, or equivalent—pick one and document it in README).
 
 ### Interactive shell and TUI experience
 
@@ -315,7 +345,7 @@ See [Vision.md — Experience and interactivity](./Vision.md#experience-and-inte
 
 | Phase | Done when |
 | ----- | --------- |
-| **P0** | `sam` opens Ink home shell with welcome + routing stub; `sam index` runs from a vault cwd; Obsidian commands succeed with resolved `vault=` when configured; AI model resolves from flag/env/config; `deno check` clean |
+| **P0** | `sam` opens Ink home shell with welcome + routing stub; `sam index` runs from a vault cwd; Obsidian commands succeed with resolved `vault=` when configured; chat and **embedding** settings resolve from flags/env/config; index writes use an **embedding-profile** path; `deno check` clean |
 | **P1** | Raw input → structured draft → related notes → wikilink suggestions → user accept creates a note in the vault; **`/new`** (home shell) and **`sam new`** both work; dry-run matches Vision |
 | **P2** | Duplicate source/file routes to canonicalize + link rewrite without breaking links; new sources reuse capture pipeline |
 | **P3** | At least one queue type processes items through the Phase 1 pipeline and moves completed work out of the queue |
