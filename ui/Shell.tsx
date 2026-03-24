@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput } from "ink";
 import { IndexProgressLine } from "./IndexProgressLine.tsx";
 import { ConnectFlow } from "./ConnectFlow.tsx";
 import type { CommandContext } from "../types.ts";
-import { executeIndex } from "../commands/index.tsx";
+import { executeIndex, indexShellMessages } from "../commands/index.tsx";
 import { loadConfigFile, saveConfigFile, type SamConfigFile } from "../config.ts";
 import {
   classifyStaleness,
@@ -378,8 +378,11 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
                 };
               });
             },
+            { continueOnEmbedError: true },
           );
-          pushMessage(`Index run finished (${result.indexedCount} indexed, ${result.deletedCount} removed).`);
+          for (const message of indexShellMessages(result)) {
+            pushMessage(message);
+          }
         } catch (error) {
           const message = String((error as Error).message ?? error);
           if (message.includes(OBSIDIAN_CONNECTION_ERROR)) {
