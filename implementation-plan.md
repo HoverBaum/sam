@@ -10,12 +10,42 @@
 | --------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Runtime         | **Deno**                                    | First-class TypeScript, no `node_modules`, built-in permissions model                                                                                                   |
 | Terminal UI     | **Ink** (React for CLIs)                    | Interactive review screens, link pickers                                                                                                                                |
-| AI              | **Vercel AI SDK** (`ai.dev`)                | Unified provider abstraction (Claude, OpenAI, Gemini, Groq, Mistral, etc.); streaming, structured output, tool calling out-of-box; selected by config or `--model` flag |
+| AI              | **Vercel AI SDK** (`ai` on npm + `@ai-sdk/*` providers) | Unified provider abstraction (Claude, OpenAI, Gemini, Groq, Mistral, etc.); `generateObject` / `generateText`, streaming, tool calling; selected by config or `--model` flag |
 | Embeddings      | **ollama + nomic-embed-text**               | Local, free, fast                                                                                                                                                       |
 | Vector index    | **vectra** (JSON-backed)                    | Simple local index, no server needed                                                                                                                                    |
-| Vault I/O       | **obsidian CLI v1.12+**                     | Official interface; keeps sync/conflict handling in Obsidian                                                                                                            |
+| Vault I/O       | **Obsidian CLI** (Obsidian 1.12+ installer) | Official interface; keeps sync/conflict handling in Obsidian. Command reference: [Obsidian CLI (bundled)](./external-docs/Obsidian-cli-docs.md)                          |
 | Source fetching | **fetch + pdf-parse**                       | URL content and PDF text extraction                                                                                                                                     |
 | Prompting       | **Built-in prompts** (`ai/instructions.ts`) | Keep note-creation behavior versioned in product code for now                                                                                                           |
+
+---
+
+## Configuration and vault resolution
+
+**Obsidian CLI vault targeting** (see [Obsidian CLI docs](./external-docs/Obsidian-cli-docs.md) — “Target a vault”):
+
+- If the shell’s **current working directory is inside a vault folder**, that vault is used by default.
+- Otherwise the CLI uses the **currently active vault** in the Obsidian app.
+- To target a specific vault explicitly, pass **`vault=<name>`** or **`vault=<id>`** as the **first parameter** before the subcommand, e.g. `obsidian vault="My Vault" create …`.
+
+**`~/.sam/config.json`** should store user defaults so runs are repeatable outside that cwd. At minimum:
+
+| Field        | Purpose |
+| ------------ | ------- |
+| `vault`      | Optional. Vault **name or id** string passed through to Obsidian as `vault=…` on every CLI invocation when set. Omit to rely on cwd / active vault. |
+| `vaultPath`  | Optional. Filesystem path to the vault root for `vault/read.ts` and indexing. If unset, use **current working directory** as vault root (matches Obsidian’s “cwd inside vault” behavior). |
+| (same file)  | AI defaults from P0-3a: `model`, `apiKey`, `baseUrl`, etc. |
+
+**Resolution order for the vault argument** (most specific wins):
+
+1. Global CLI flag, e.g. `--vault <name-or-id>` (wire in P0-1 / scaffold)
+2. Environment variable, e.g. `SAM_VAULT`
+3. `vault` in `~/.sam/config.json`
+4. Omit `vault=` — Obsidian uses cwd vault or active vault
+
+**Implementation notes:**
+
+- `vault/client.ts` builds each command line as: optional `vault=<resolved> ` prefix, then the Obsidian subcommand and parameters documented in the bundled CLI reference.
+- `vault/read.ts` (indexing) uses `vaultPath` from config when set; otherwise the vault root is the **current working directory** (same default idea as Obsidian: shell inside the vault folder).
 
 ---
 
@@ -24,6 +54,7 @@
 ```
 sam/
 ├── cli.tsx                   # Entry point, command routing
+├── config.ts                 # Load ~/.sam/config.json; merge flags/env (vault, model, …)
 ├── commands/
 │   ├── new.tsx               # Capture pipeline
 │   ├── index.ts              # Vault indexer + watch mode
@@ -61,12 +92,14 @@ sam/
 
 #### P0-1: Project scaffold
 - [ ] `deno.json` with tasks: `dev`, `build`, `test`
-- [ ] Import map pointing to npm specifiers for Ink, and AI provider SDKs as needed
-- [ ] `cli.tsx` entry with `--dry-run` and `--model` global flags wired
+- [ ] Import map pointing to npm specifiers for `ai`, `@ai-sdk/*` providers, Ink, and other deps as needed
+- [ ] `cli.tsx` entry with global flags: `--dry-run`, `--model`, `--vault` (see [Configuration and vault resolution](#configuration-and-vault-resolution))
+- [ ] Load and merge `~/.sam/config.json` (create schema with defaults for missing keys)
 - [ ] Compile check passes (`deno check`)
 
 #### P0-2: `vault/client.ts` — obsidian CLI wrapper
-- [ ] Shell out to `obsidian` CLI for: `create`, `open`, `move`, `list`, `read`
+- [ ] Resolve vault for every invocation using: `--vault` → `SAM_VAULT` → `config.vault` → omit (cwd / active vault); pass `vault=<name|id>` as **first** token when set ([Obsidian CLI docs](./external-docs/Obsidian-cli-docs.md))
+- [ ] Shell out to `obsidian` CLI for vault operations per bundled reference (e.g. `create`, `open`, `move`, `files`, `read`; exact names/params per [Obsidian CLI docs](./external-docs/Obsidian-cli-docs.md))
 - [ ] **Backlinks & link graph:**
   - `backlinks(file): Promise<BacklinkEntry[]>` — who links to a note (`file=` or `path=`, `format=json`)
   - `links(file): Promise<LinkEntry[]>` — outgoing links from a note
@@ -77,11 +110,11 @@ sam/
 - [ ] Typed return values; throw on non-zero exit
 
 #### P0-3a: `ai/config.ts` — AI model selection
-- [ ] Define config shape: `{ model: string, apiKey?: string, baseUrl?: string }`
+- [ ] Define config shape aligned with `~/.sam/config.json`: `{ model: string, apiKey?: string, baseUrl?: string, vault?: string, vaultPath?: string }` (shared `config` module for `vault/client.ts`, `vault/read.ts`, and `ai/config.ts`)
 - [ ] Model selection order: `--model` flag → `SAM_AI_MODEL` env var → `~/.sam/config.json` → default (`anthropic/claude-3-5-sonnet-20241022`)
 - [ ] Support Vercel AI SDK model IDs: `anthropic/claude-*`, `openai/*`, `google/*`, `mistral/*`, `groq/*`, etc.
 - [ ] For local models: support OpenAI-compatible baseUrl endpoint (e.g., `baseUrl: "http://localhost:11434"`)
-- [ ] All `ai/` modules import from `ai` package (`@vercel/ai`) and use the resolved model string; no direct SDK imports elsewhere
+- [ ] All `ai/` modules import from the `ai` package and provider packages (`@ai-sdk/anthropic`, …) only through a thin layer in `ai/config.ts` where practical; avoid scattering provider SDK imports
 
 #### P0-3b: `ai/instructions.ts` — built-in prompt assembly
 - [ ] Define the core system prompt for note structuring and link-weaving
@@ -90,11 +123,14 @@ sam/
 - [ ] Return prompt fragments/helpers that `ai/structure.ts` and `ai/link.ts` can reuse
 
 #### P0-4: `sam index` command (`commands/index.ts`)
-- [ ] Walk vault directory via `vault/read.ts`
+- [ ] Walk vault directory via `vault/read.ts` (same vault path rules as [Configuration and vault resolution](#configuration-and-vault-resolution))
 - [ ] Embed each note with `search/embed.ts` (ollama `nomic-embed-text`)
 - [ ] Upsert into `search/index.ts` (vectra JSON index, stored in `~/.sam/index/`)
-- [ ] `--watch` flag: file-system watcher re-indexes on change
+- [ ] `--skip-embed`: update metadata / file list only without calling ollama (supports machines without local embeddings; pairs with [Error handling](#error-handling))
+- [ ] `--watch` flag: file-system watcher re-indexes on change (debounce rapid saves to avoid thrashing on large vaults)
 - [ ] Progress bar via Ink; respect `--dry-run` (report what would be indexed)
+
+**Note:** `search/embed.ts` and `search/index.ts` are implemented here first; Phase 1 **reuses** these modules for `sam new` (no second implementation). P1-3 is “capture pipeline uses the shared search API,” not a duplicate embed layer.
 
 ---
 
@@ -113,19 +149,21 @@ sam/
 
 #### P1-2: `ai/structure.ts` — structure raw input
 - [ ] Build prompt: built-in system instructions + raw content
-- [ ] Call `generateObject()` from Vercel AI SDK (via resolved model from `ai/config.ts`); expect back: `{ title, tags, body }` (structured Zettel)
-- [ ] Uses `structuredObject` for schema validation and type safety
+- [ ] Call `generateObject()` from the `ai` package (via resolved model from `ai/config.ts`); expect back: `{ title, tags, body }` (structured Zettel)
+- [ ] Define a **Zod** schema for the structured object and pass it to `generateObject` so validation and TypeScript types stay aligned
 - [ ] Return typed `ZettelDraft`
 
-#### P1-3: `search/embed.ts` + `search/index.ts`
+#### P1-3: `search/embed.ts` + `search/index.ts` (consumption in capture)
+- [ ] Consume the **shared** modules from P0-4 (implement there first; no parallel embed stack)
 - [ ] `embed(text: string): Promise<number[]>` — POST to local ollama endpoint
 - [ ] `query(vector: number[], topN: number): Promise<{ id, title, summary, score }[]>` — cosine search vectra
 - [ ] `upsert(id, vector, metadata)` — add/update note in index
 
 #### P1-4: `ai/link.ts` — weave wikilinks
+- [ ] **Depends on P1-3:** embed/query the draft (or its title) to retrieve top-N candidates before linking
 - [ ] Input: `ZettelDraft` + top-N related note titles/summaries
 - [ ] Also fetch `backlinks` of each candidate note — notes that already link to a candidate are stronger signals
-- [ ] Call `generateText()` from Vercel AI SDK (via resolved model from `ai/config.ts`) to naturally insert `[[wikilinks]]` where appropriate
+- [ ] Call `generateText()` from the `ai` package (via resolved model from `ai/config.ts`) to naturally insert `[[wikilinks]]` where appropriate
 - [ ] Return updated draft body; do not invent links not in the candidate list
 
 #### P1-5: `ui/ReviewScreen.tsx` — Ink review UI
@@ -135,7 +173,7 @@ sam/
 - [ ] On accept: call `vault/client.ts create`
 
 #### P1-6: Wire `commands/new.tsx`
-- [ ] Compose P1-1 → P1-2 → P1-3 → P1-4 → P1-5 in sequence
+- [ ] Compose in order: **P1-1** ingest → **P1-2** structure → **P1-3** retrieve related notes (embed + query) → **P1-4** weave links → **P1-5** review UI
 - [ ] Respect `--dry-run`: print formatted dry-run block instead of writing
 - [ ] Dry-run format matches Vision.md example exactly
 
@@ -189,7 +227,7 @@ sam/
   - `ExternalQueue`: reads from a synced local file/folder (Discord export, etc.)
 
 #### P3-2: Fragment splitting (AI)
-- [ ] For `SingleNoteQueue`: call `generateObject()` from Vercel AI SDK (via resolved model from `ai/config.ts`), request split points and candidate titles
+- [ ] For `SingleNoteQueue`: call `generateObject()` from the `ai` package with a **Zod** schema (via resolved model from `ai/config.ts`), request split points and candidate titles
 - [ ] Return `Fragment[]`; human reviews splits in Ink before proceeding
 
 #### P3-3: `commands/process.tsx` — inbox processor
@@ -228,21 +266,48 @@ Every command that modifies the vault must:
 3. Exit 0 without touching the vault
 
 ### Error handling
-- Obsidian CLI not found → clear install instructions
-- ollama not running → explain how to start, suggest `sam index --skip-embed` fallback
+- Obsidian CLI not found → clear install instructions (see [Obsidian CLI docs](./external-docs/Obsidian-cli-docs.md) — install, PATH, Obsidian must be running)
+- ollama not running → explain how to start; suggest `sam index --skip-embed` when embeddings are optional
 - AI provider not reachable / bad API key → surface message, show which provider is configured, offer retry or `--discard`
+- Network fetch failures (`--url`) → clear error with URL; optional timeouts and size limits (see Security)
+- Empty or unchanged `$EDITOR` buffer → treat as cancel or validation error with a clear message
+
+### Security (untrusted input)
+URL and PDF ingestion processes **untrusted** content. For v1: enforce reasonable **size limits** (response body, PDF bytes), **timeouts** on fetch, and avoid executing or interpreting HTML beyond readability extraction. Prefer failing closed with a readable error over silent truncation where safety is ambiguous.
 
 ### Testing strategy
-- Unit tests: all `scripts/` modules (dedup, canonicalize, link-rewrite) — pure functions, easy to test
-- Integration tests: capture pipeline with fixture vault and mocked AI provider/ollama responses
-- Manual smoke test checklist per phase before moving to next
+- **Unit tests:** `scripts/` modules (dedup, canonicalize, link-rewrite) — pure functions
+- **Contract / integration tests:** `vault/client.ts` — parse JSON output from recorded `obsidian` invocations (or a test double) for `backlinks`, `links`, `unresolved`, etc.
+- **Integration tests:** `ai/structure.ts` and `ai/link.ts` with **mocked** provider responses (golden outputs) so prompts and schema stay stable
+- **Integration tests:** capture pipeline end-to-end with fixture vault and mocked AI + ollama
+- **Manual smoke test** checklist per phase before moving to next
+
+### CI
+Run `deno task test` and `deno check` on every push/PR (exact CI product optional; minimum bar is scripted locally or in CI).
+
+---
+
+## Phase acceptance criteria (maps to [Vision.md](./Vision.md) success criteria)
+
+| Phase | Done when |
+| ----- | --------- |
+| **P0** | `sam index` runs from a vault cwd; Obsidian commands succeed with resolved `vault=` when configured; AI model resolves from flag/env/config; `deno check` clean |
+| **P1** | Raw input → structured draft → related notes → wikilink suggestions → user accept creates a note in the vault; dry-run matches Vision |
+| **P2** | Duplicate source/file routes to canonicalize + link rewrite without breaking links; new sources reuse capture pipeline |
+| **P3** | At least one queue type processes items through the Phase 1 pipeline and moves completed work out of the queue |
+
+---
+
+## Performance and scale
+
+For large vaults, full embedding on every change is expensive. **`--watch`** should debounce file events. Longer term, incremental or dirty-only re-indexing may be needed; not required for v1 beyond debouncing and clear progress reporting.
 
 ---
 
 ## Build Order Summary
 
 ```
-P0-1 → P0-2 → P0-3 → P0-4   (Foundation — unblock all phases)
+P0-1 → P0-2 → P0-3a → P0-3b → P0-4   (Foundation — unblock all phases)
          ↓
 P1-1 → P1-2 → P1-3 → P1-4 → P1-5 → P1-6   (Capture — core daily-use command)
          ↓
