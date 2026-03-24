@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { render, Text, useApp } from "ink";
+import { IndexProgressLine } from "../ui/IndexProgressLine.tsx";
 import type { CommandArgs, CommandContext } from "../types.ts";
 import { booleanFlag } from "../utils/args.ts";
+import { mapLimit } from "../utils/concurrency.ts";
 import { embed } from "../search/embed.ts";
 import {
   assertProfileMatch,
@@ -18,14 +20,11 @@ import {
 } from "../search/index.ts";
 import { VaultClient } from "../vault/client.ts";
 
-function progressLine(done: number, total: number, label: string): string {
-  if (total <= 0) return `${label}: 0/0`;
-  const pct = Math.round((done / total) * 100);
-  return `${label}: ${done}/${total} (${pct}%)`;
-}
+/** Max concurrent Obsidian CLI processes during mtime scan (avoids fork bombs on large vaults). */
+const INDEX_OBSIDIAN_CONCURRENCY = 24;
 
 function ProgressView(props: { total: number; done: number; phase: string }) {
-  return <Text>{progressLine(props.done, props.total, props.phase)}</Text>;
+  return <IndexProgressLine phase={props.phase} done={props.done} total={props.total} />;
 }
 
 interface IndexRunState {
@@ -81,14 +80,17 @@ export async function executeIndex(
   onProgress({ phase: "Listing markdown files", done: 0, total: 1 });
   const paths = (await vault.files("md")).filter((line) => line.endsWith(".md"));
 
-  const currentFiles = await Promise.all(
-    paths.map(async (path) => {
-      const code = `JSON.stringify(app.vault.getAbstractFileByPath(${JSON.stringify(path)})?.stat?.mtime ?? 0)`;
-      const mtimeText = await vault.eval(code);
-      const mtime = Number(mtimeText.replaceAll("\"", ""));
-      return { path, mtime: Number.isFinite(mtime) ? mtime : 0 };
-    }),
-  );
+  const pathTotal = Math.max(paths.length, 1);
+  onProgress({ phase: "Checking file timestamps", done: 0, total: pathTotal });
+  let mtimeDone = 0;
+  const currentFiles = await mapLimit(paths, INDEX_OBSIDIAN_CONCURRENCY, async (path) => {
+    const code = `JSON.stringify(app.vault.getAbstractFileByPath(${JSON.stringify(path)})?.stat?.mtime ?? 0)`;
+    const mtimeText = await vault.eval(code);
+    const mtime = Number(mtimeText.replaceAll("\"", ""));
+    mtimeDone += 1;
+    onProgress({ done: mtimeDone, total: pathTotal });
+    return { path, mtime: Number.isFinite(mtime) ? mtime : 0 };
+  });
 
   const staleness = classifyStaleness(rebuild ? null : existingManifest, currentFiles);
   const targets = rebuild ? currentFiles.map((f) => f.path) : [...staleness.newPaths, ...staleness.modifiedPaths];

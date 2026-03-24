@@ -13,6 +13,7 @@
     "npm:@ai-sdk/openai@^1.3.23": "1.3.24_zod@3.25.76",
     "npm:@types/react@^18.3.12": "18.3.28",
     "npm:ai@^4.3.16": "4.3.19_react@18.3.1_zod@3.25.76",
+    "npm:ink-spinner@5": "5.0.0_ink@5.2.1__react@18.3.1__@types+react@18.3.28_react@18.3.1_@types+react@18.3.28",
     "npm:ink@^5.0.1": "5.2.1_react@18.3.1_@types+react@18.3.28",
     "npm:react@^18.3.1": "18.3.1"
   },
@@ -185,6 +186,9 @@
         "restore-cursor"
       ]
     },
+    "cli-spinners@2.9.2": {
+      "integrity": "sha512-ywqV+5MmyL4E7ybXgKys4DugZbX0FC6LnwrhjuykIjnK9k8OQacQ7axGKnjDXWNhns0xot3bZI5h55H8yo9cJg=="
+    },
     "cli-truncate@4.0.0": {
       "integrity": "sha512-nPdaFdQ0h/GEigbPClz11D0v/ZJEwxmeVZGeMo3Z5StPtUTkA9o1lD6QwoirYiSDzbcwn2XcjwmCp68W1IS4TA==",
       "dependencies": [
@@ -227,6 +231,14 @@
     },
     "indent-string@5.0.0": {
       "integrity": "sha512-m6FAo/spmsW2Ab2fU35JTYwtOKa2yAwXSwgjSv1TJzh4Mh7mC3lzAOVLBprb72XsTrgkEIsl7YrFNAiDiRhIGg=="
+    },
+    "ink-spinner@5.0.0_ink@5.2.1__react@18.3.1__@types+react@18.3.28_react@18.3.1_@types+react@18.3.28": {
+      "integrity": "sha512-EYEasbEjkqLGyPOUc8hBJZNuC5GvXGMLu0w5gdTNskPc7Izc5vO3tdQEYnzvshucyGCBXc86ig0ujXPMWaQCdA==",
+      "dependencies": [
+        "cli-spinners",
+        "ink@5.2.1_react@18.3.1_@types+react@18.3.28",
+        "react"
+      ]
     },
     "ink@5.2.1_react@18.3.1": {
       "integrity": "sha512-BqcUyWrG9zq5HIwW6JcfFHsIYebJkWWb4fczNah1goUO0vv5vneIlfwuS85twyJ5hYR/y18FlAYUxrO9ChIWVg==",
@@ -472,6 +484,7 @@
       "npm:@ai-sdk/openai@^1.3.23",
       "npm:@types/react@^18.3.12",
       "npm:ai@^4.3.16",
+      "npm:ink-spinner@5",
       "npm:ink@^5.0.1",
       "npm:react@^18.3.1"
     ]

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
+import { IndexProgressLine } from "./IndexProgressLine.tsx";
 import type { CommandContext } from "../types.ts";
 import { executeIndex } from "../commands/index.tsx";
 import { loadConfigFile, saveConfigFile, type SamConfigFile } from "../config.ts";
@@ -102,6 +103,11 @@ export function Shell({ context }: ShellProps) {
     { id: 1, text: "Welcome to sam. Try /index or /config." },
   ]);
   const [busy, setBusy] = useState(false);
+  const [indexProgress, setIndexProgress] = useState<{
+    phase: string;
+    done: number;
+    total: number;
+  } | null>(null);
   const [staleHint, setStaleHint] = useState<string | null>(null);
   const [vaultDisplay, setVaultDisplay] = useState<string>(
     context.config.vault?.trim().length ? context.config.vault : "(resolving...)",
@@ -121,11 +127,12 @@ export function Shell({ context }: ShellProps) {
   const [vaultSuggestions, setVaultSuggestions] = useState<string[]>([]);
 
   const prompt = useMemo(() => {
-    if (busy) return "sam (busy)> ";
+    if (busy && !indexProgress) return "sam (busy)> ";
+    if (busy) return "sam> ";
     if (uiMode === "settings-menu") return "settings> ";
     if (uiMode === "settings-edit" && editingField) return `edit ${editingField}> `;
     return "sam> ";
-  }, [busy, uiMode, editingField]);
+  }, [busy, indexProgress, uiMode, editingField]);
 
   const pushMessage = (text: string) => {
     setMessages((prev: ShellMessage[]) => {
@@ -345,12 +352,22 @@ export function Shell({ context }: ShellProps) {
       }
       if (route === "/index") {
         setBusy(true);
+        setIndexProgress({ phase: "Starting", done: 0, total: 1 });
         pushMessage("Starting index run...");
         try {
           const result = await executeIndex(
             context,
             { flags: {}, positionals: [] },
-            () => {},
+            (patch) => {
+              setIndexProgress((prev) => {
+                const base = prev ?? { phase: "Starting", done: 0, total: 1 };
+                return {
+                  phase: patch.phase ?? base.phase,
+                  done: patch.done ?? base.done,
+                  total: patch.total ?? base.total,
+                };
+              });
+            },
           );
           pushMessage(`Index run finished (${result.indexedCount} indexed, ${result.deletedCount} removed).`);
         } catch (error) {
@@ -364,6 +381,7 @@ export function Shell({ context }: ShellProps) {
           }
         } finally {
           setBusy(false);
+          setIndexProgress(null);
         }
         return;
       }
@@ -429,6 +447,17 @@ export function Shell({ context }: ShellProps) {
           <Text key={msg.id}>{msg.text}</Text>
         ))}
       </Box>
+      {busy && indexProgress
+        ? (
+          <Box marginTop={1}>
+            <IndexProgressLine
+              phase={indexProgress.phase}
+              done={indexProgress.done}
+              total={indexProgress.total}
+            />
+          </Box>
+        )
+        : null}
       <Text>
         {prompt}
         {uiMode === "settings-edit" ? editBuffer : input}
