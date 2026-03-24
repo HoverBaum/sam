@@ -6,16 +6,16 @@
 
 ## Tech Stack
 
-| Layer           | Choice                                      | Reason                                                                                                          |
-| --------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Runtime         | **Deno**                                    | First-class TypeScript, no `node_modules`, built-in permissions model                                           |
-| Terminal UI     | **Ink** (React for CLIs)                    | Interactive review screens, link pickers                                                                        |
-| AI              | **Pluggable provider** (`ai/provider.ts`)   | Claude, OpenAI, Gemini, or any local model via OpenAI-compatible endpoint; selected by config or `--model` flag |
-| Embeddings      | **ollama + nomic-embed-text**               | Local, free, fast                                                                                               |
-| Vector index    | **vectra** (JSON-backed)                    | Simple local index, no server needed                                                                            |
-| Vault I/O       | **obsidian CLI v1.12+**                     | Official interface; keeps sync/conflict handling in Obsidian                                                    |
-| Source fetching | **fetch + pdf-parse**                       | URL content and PDF text extraction                                                                             |
-| Prompting       | **Built-in prompts** (`ai/instructions.ts`) | Keep note-creation behavior versioned in product code for now                                                   |
+| Layer           | Choice                                      | Reason                                                                                                                                                                  |
+| --------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime         | **Deno**                                    | First-class TypeScript, no `node_modules`, built-in permissions model                                                                                                   |
+| Terminal UI     | **Ink** (React for CLIs)                    | Interactive review screens, link pickers                                                                                                                                |
+| AI              | **Vercel AI SDK** (`ai.dev`)                | Unified provider abstraction (Claude, OpenAI, Gemini, Groq, Mistral, etc.); streaming, structured output, tool calling out-of-box; selected by config or `--model` flag |
+| Embeddings      | **ollama + nomic-embed-text**               | Local, free, fast                                                                                                                                                       |
+| Vector index    | **vectra** (JSON-backed)                    | Simple local index, no server needed                                                                                                                                    |
+| Vault I/O       | **obsidian CLI v1.12+**                     | Official interface; keeps sync/conflict handling in Obsidian                                                                                                            |
+| Source fetching | **fetch + pdf-parse**                       | URL content and PDF text extraction                                                                                                                                     |
+| Prompting       | **Built-in prompts** (`ai/instructions.ts`) | Keep note-creation behavior versioned in product code for now                                                                                                           |
 
 ---
 
@@ -30,10 +30,10 @@ sam/
 │   ├── process.tsx           # Inbox processor
 │   └── source.ts             # Source pipeline (URL / PDF)
 ├── ai/
-│   ├── provider.ts           # Provider abstraction (Claude / OpenAI / Gemini / local)
+│   ├── config.ts             # Model/API key selection and resolution
 │   ├── instructions.ts       # Built-in system prompts and prompt assembly
-│   ├── structure.ts          # AI: raw input → Zettel draft
-│   └── link.ts               # AI: draft + candidates → wikilinks
+│   ├── structure.ts          # AI: raw input → Zettel draft (generateObject)
+│   └── link.ts               # AI: draft + candidates → wikilinks (generateText)
 ├── search/
 │   ├── embed.ts              # ollama nomic-embed wrapper
 │   └── index.ts              # vectra build / update / query
@@ -76,12 +76,12 @@ sam/
 - [ ] Accept `--dry-run`: log intended command, skip execution
 - [ ] Typed return values; throw on non-zero exit
 
-#### P0-3a: `ai/provider.ts` — provider abstraction
-- [ ] Define `AIProvider` interface: `{ complete(messages, options): Promise<string> }`
-- [ ] Implementations: `ClaudeProvider`, `OpenAIProvider`, `GeminiProvider`, `OllamaProvider` (OpenAI-compatible local endpoint)
-- [ ] Selection order: `--model` flag → `SAM_AI_PROVIDER` env var → `~/.sam/config.json` → default (`claude`)
-- [ ] Config shape: `{ provider: string, model?: string, apiKey?: string, baseUrl?: string }`
-- [ ] All `ai/` modules receive a provider instance; never import an SDK directly
+#### P0-3a: `ai/config.ts` — AI model selection
+- [ ] Define config shape: `{ model: string, apiKey?: string, baseUrl?: string }`
+- [ ] Model selection order: `--model` flag → `SAM_AI_MODEL` env var → `~/.sam/config.json` → default (`anthropic/claude-3-5-sonnet-20241022`)
+- [ ] Support Vercel AI SDK model IDs: `anthropic/claude-*`, `openai/*`, `google/*`, `mistral/*`, `groq/*`, etc.
+- [ ] For local models: support OpenAI-compatible baseUrl endpoint (e.g., `baseUrl: "http://localhost:11434"`)
+- [ ] All `ai/` modules import from `ai` package (`@vercel/ai`) and use the resolved model string; no direct SDK imports elsewhere
 
 #### P0-3b: `ai/instructions.ts` — built-in prompt assembly
 - [ ] Define the core system prompt for note structuring and link-weaving
@@ -113,8 +113,8 @@ sam/
 
 #### P1-2: `ai/structure.ts` — structure raw input
 - [ ] Build prompt: built-in system instructions + raw content
-- [ ] Call provider via `ai/provider.ts`; expect back: `{ title, tags, body }` (structured Zettel)
-- [ ] Parse and validate response
+- [ ] Call `generateObject()` from Vercel AI SDK (via resolved model from `ai/config.ts`); expect back: `{ title, tags, body }` (structured Zettel)
+- [ ] Uses `structuredObject` for schema validation and type safety
 - [ ] Return typed `ZettelDraft`
 
 #### P1-3: `search/embed.ts` + `search/index.ts`
@@ -125,7 +125,7 @@ sam/
 #### P1-4: `ai/link.ts` — weave wikilinks
 - [ ] Input: `ZettelDraft` + top-N related note titles/summaries
 - [ ] Also fetch `backlinks` of each candidate note — notes that already link to a candidate are stronger signals
-- [ ] Call provider via `ai/provider.ts` to naturally insert `[[wikilinks]]` where appropriate
+- [ ] Call `generateText()` from Vercel AI SDK (via resolved model from `ai/config.ts`) to naturally insert `[[wikilinks]]` where appropriate
 - [ ] Return updated draft body; do not invent links not in the candidate list
 
 #### P1-5: `ui/ReviewScreen.tsx` — Ink review UI
@@ -189,7 +189,7 @@ sam/
   - `ExternalQueue`: reads from a synced local file/folder (Discord export, etc.)
 
 #### P3-2: Fragment splitting (AI)
-- [ ] For `SingleNoteQueue`: AI reads the note via `ai/provider.ts`, suggests split points and candidate titles
+- [ ] For `SingleNoteQueue`: call `generateObject()` from Vercel AI SDK (via resolved model from `ai/config.ts`), request split points and candidate titles
 - [ ] Return `Fragment[]`; human reviews splits in Ink before proceeding
 
 #### P3-3: `commands/process.tsx` — inbox processor
