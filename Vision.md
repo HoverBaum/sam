@@ -66,17 +66,18 @@ All reads and writes go through the official `obsidian` CLI (v1.12+). This keeps
 
 | Module                 | Responsibility                                                              |
 | ---------------------- | --------------------------------------------------------------------------- |
-| `cli.tsx`              | Entry point, command routing (yargs), global flags (`--dry-run`, `--skill`) |
+| `cli.tsx`              | Entry point, command routing, global flags (`--dry-run`, `--skill`) |
 | `commands/new.tsx`     | Capture pipeline: ingest → structure → link → review → write                |
 | `commands/index.ts`    | Vault embedding indexer, watch mode                                         |
 | `commands/process.tsx` | Inbox processor: batch review of unprocessed notes                          |
 | `commands/source.ts`   | Source pipeline: URL/file → note, with deduplication logic                  |
-| `ai/structure.ts`      | Claude: raw input → structured Zettel draft                                 |
-| `ai/link.ts`           | Claude: draft + related notes → wikilinks woven into body                   |
+| `ai/provider.ts`       | Provider abstraction: route calls to Claude, OpenAI, Gemini, or local LLM   |
+| `ai/structure.ts`      | AI: raw input → structured Zettel draft                                     |
+| `ai/link.ts`           | AI: draft + related notes → wikilinks woven into body                       |
 | `ai/skill.ts`          | Load and apply skill files as system prompts                                |
 | `search/embed.ts`      | ollama/nomic-embed wrapper                                                  |
 | `search/index.ts`      | vectra index: build, update, query                                          |
-| `vault/client.ts`      | Thin wrapper over `obsidian` CLI commands                                   |
+| `vault/client.ts`      | Thin wrapper over `obsidian` CLI commands (CRUD, backlinks, links, orphans)  |
 | `vault/read.ts`        | Direct fs reads for embedding pipeline only                                 |
 | `scripts/`             | Pure deterministic scripts (dedup, link rewrite, canonical, etc.)           |
 | `ui/ReviewScreen.tsx`  | Ink: show draft, accept/edit/discard                                        |
