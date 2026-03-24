@@ -8,6 +8,7 @@ Phase 0 foundation currently includes:
 - Embedding provider adapters (`search/embed.ts`)
 - Profile-isolated index + manifest engine (`search/index.ts`)
 - `sam index` command
+- `sam connect` — similar notes via the vector index (shell route `/connect`)
 - Ink home shell (default `sam` entrypoint)
 
 ## Usage
@@ -15,8 +16,14 @@ Phase 0 foundation currently includes:
 ```bash
 sam
 sam index
+sam connect
+sam connect "Projects/Some note.md"
 sam --dry-run index --skip-embed
 ```
+
+### Similar notes (`sam connect` / `/connect`)
+
+After `sam index`, find the five closest **other** notes by embedding cosine similarity. In the home shell, run `/connect` and use **Tab** to cycle name matches, **Enter** to search, **Esc** to go back. Non-interactive: `sam connect "<vault path>"` prints `path<TAB>score` lines for scripting. Re-run `sam index` when the shell warns that notes changed so results stay fresh.
 
 Global flags:
 - `--dry-run`

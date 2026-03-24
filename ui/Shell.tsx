@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import { IndexProgressLine } from "./IndexProgressLine.tsx";
+import { ConnectFlow } from "./ConnectFlow.tsx";
 import type { CommandContext } from "../types.ts";
 import { executeIndex } from "../commands/index.tsx";
 import { loadConfigFile, saveConfigFile, type SamConfigFile } from "../config.ts";
@@ -15,12 +16,16 @@ interface ShellProps {
   context: CommandContext;
 }
 
+interface ShellMainProps extends ShellProps {
+  onOpenConnect: () => void;
+}
+
 interface ShellMessage {
   id: number;
   text: string;
 }
 
-type Route = "/new" | "/index" | "/config" | "help" | "";
+type Route = "/new" | "/index" | "/connect" | "/config" | "help" | "";
 type SettingsField =
   | "vault"
   | "model"
@@ -69,6 +74,7 @@ function parseRoute(input: string): Route {
   const trimmed = input.trim();
   if (trimmed.startsWith("/new")) return "/new";
   if (trimmed.startsWith("/index")) return "/index";
+  if (trimmed.startsWith("/connect")) return "/connect";
   if (trimmed.startsWith("/config") || trimmed.startsWith("/settings")) return "/config";
   if (trimmed === "/help" || trimmed === "help") return "help";
   return "";
@@ -96,11 +102,11 @@ function trimSuggestions(values: string[]): string[] {
   return out;
 }
 
-export function Shell({ context }: ShellProps) {
+function ShellMain({ context, onOpenConnect }: ShellMainProps) {
   const { exit } = useApp();
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ShellMessage[]>([
-    { id: 1, text: "Welcome to sam. Try /index or /config." },
+    { id: 1, text: "Welcome to sam. Try /index, /connect, or /config." },
   ]);
   const [busy, setBusy] = useState(false);
   const [indexProgress, setIndexProgress] = useState<{
@@ -343,7 +349,11 @@ export function Shell({ context }: ShellProps) {
         return;
       }
       if (route === "help") {
-        pushMessage("Routes: /new, /index, /config (/settings alias), /help. Ctrl+C exits.");
+        pushMessage("Routes: /new, /index, /connect, /config (/settings alias), /help. Ctrl+C exits.");
+        return;
+      }
+      if (route === "/connect") {
+        onOpenConnect();
         return;
       }
       if (route === "/new") {
@@ -464,4 +474,12 @@ export function Shell({ context }: ShellProps) {
       </Text>
     </Box>
   );
+}
+
+export function Shell(props: ShellProps) {
+  const [flow, setFlow] = useState<"main" | "connect">("main");
+  if (flow === "connect") {
+    return <ConnectFlow context={props.context} onExit={() => setFlow("main")} />;
+  }
+  return <ShellMain context={props.context} onOpenConnect={() => setFlow("connect")} />;
 }

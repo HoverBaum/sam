@@ -3,6 +3,7 @@ import { render } from "ink";
 import { ensureSamDirs, resolveRuntimeConfig } from "./config.ts";
 import { parseArgs } from "./utils/args.ts";
 import type { CommandArgs, CommandContext } from "./types.ts";
+import { runConnectCommand } from "./commands/connect.tsx";
 import { runIndexCommand } from "./commands/index.tsx";
 import { runNewCommand } from "./commands/new.tsx";
 import { runProcessCommand } from "./commands/process.tsx";
@@ -18,6 +19,11 @@ async function runSubcommand(
     return;
   }
 
+  if (command === "connect") {
+    await runConnectCommand(context, args);
+    return;
+  }
+
   if (command === "new") {
     await runNewCommand(context, args);
     return;
@@ -30,7 +36,7 @@ async function runSubcommand(
 
   if (command === "help" || command === "--help") {
     console.log("sam [--dry-run] [--model <id>] [--vault <name-or-id>] [--embed-model <id>] [subcommand]");
-    console.log("Subcommands: index, new, process");
+    console.log("Subcommands: index, connect, new, process");
     return;
   }
 

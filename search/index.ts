@@ -178,6 +178,55 @@ function cosine(a: number[], b: number[]): number {
   return dot / (Math.sqrt(aNorm) * Math.sqrt(bNorm));
 }
 
+export interface NeighborHit {
+  id: string;
+  title: string;
+  summary: string;
+  score: number;
+}
+
+/** Pure ranking: cosine similarity to `sourcePath`'s vector, excluding the source note. */
+export function rankNearestNeighbors(
+  store: Map<string, IndexItem>,
+  sourcePath: string,
+  k: number,
+): NeighborHit[] {
+  const source = store.get(sourcePath);
+  if (!source) {
+    throw new Error(`Note not in index: ${sourcePath}. Run \`sam index\` to index this note.`);
+  }
+  const vector = source.vector;
+  return [...store.values()]
+    .filter((item) => item.id !== sourcePath)
+    .map((item) => ({
+      id: item.id,
+      title: item.metadata.title ?? item.metadata.path,
+      summary: item.metadata.summary ?? "",
+      score: cosine(item.vector, vector),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(0, k));
+}
+
+export async function nearestNeighbors(
+  config: RuntimeConfig,
+  sourcePath: string,
+  k: number,
+): Promise<NeighborHit[]> {
+  const dir = await resolveActiveProfileDir(config);
+  const manifest = await readManifest(dir);
+  if (!manifest) {
+    throw new Error("No index profile found. Run `sam index` to build the index.");
+  }
+  const store = await readStore(dir);
+  const source = store.get(sourcePath);
+  if (!source) {
+    throw new Error(`Note not in index: ${sourcePath}. Run \`sam index\` to index this note.`);
+  }
+  assertProfileMatch(config, manifest, source.vector.length);
+  return rankNearestNeighbors(store, sourcePath, k);
+}
+
 export async function query(
   config: RuntimeConfig,
   vector: number[],

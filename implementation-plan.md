@@ -347,6 +347,7 @@ See [Vision.md — Experience and interactivity](./Vision.md#experience-and-inte
 - **Slash routing** (e.g. `/new …`) as the primary discoverable command surface inside the shell; extend with more routes over time.
 - **Feel:** welcoming copy, clear hints, and **responsive** UI (loading states, no “frozen” screen during slow work where avoidable).
 - **Fun:** intentional microcopy and polish so `sam` is enjoyable to open—within the same calm tone as the rest of the vision.
+- **Similar notes (sidecar):** `sam connect` and shell route `/connect` query the embedding index for nearest-neighbor notes (see README). This is independent of the Phase 1 capture milestone and does not block phase gates.
 
 ---
 
