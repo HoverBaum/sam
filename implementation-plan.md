@@ -9,7 +9,7 @@
 | Layer           | Choice                                      | Reason                                                                                                                                                                  |
 | --------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Runtime         | **Deno**                                    | First-class TypeScript, no `node_modules`, built-in permissions model                                                                                                   |
-| Terminal UI     | **Ink** (React for CLIs)                    | Interactive review screens, link pickers                                                                                                                                |
+| Terminal UI     | **Ink** (React for CLIs)                    | **Home shell** (welcome + routing), review screens, link pickers; aim for a **highly responsive** TUI—see [Interactive shell and TUI](#interactive-shell-and-tui-experience) |
 | AI              | **Vercel AI SDK** (`ai` on npm + `@ai-sdk/*` providers) | Unified provider abstraction (Claude, OpenAI, Gemini, Groq, Mistral, etc.); `generateObject` / `generateText`, streaming, tool calling; selected by config or `--model` flag |
 | Embeddings      | **ollama + nomic-embed-text**               | Local, free, fast                                                                                                                                                       |
 | Vector index    | **vectra** (JSON-backed)                    | Simple local index, no server needed                                                                                                                                    |
@@ -76,6 +76,7 @@ sam/
 │   ├── canonicalize.ts       # Rewrite vault links → canonical note
 │   └── link-rewrite.ts       # Bulk wikilink rewrite utility
 ├── ui/
+│   ├── Shell.tsx             # Ink: default home — greeting, input, slash routing (/new, …)
 │   ├── ReviewScreen.tsx      # Ink: show draft, accept / edit / discard
 │   └── LinkPicker.tsx        # Ink: toggle suggested wikilinks
 ├── deno.json                 # Tasks, import map, permissions
@@ -95,6 +96,7 @@ sam/
 - [ ] Import map pointing to npm specifiers for `ai`, `@ai-sdk/*` providers, Ink, and other deps as needed
 - [ ] `cli.tsx` entry with global flags: `--dry-run`, `--model`, `--vault` (see [Configuration and vault resolution](#configuration-and-vault-resolution))
 - [ ] Load and merge `~/.sam/config.json` (create schema with defaults for missing keys)
+- [ ] **Routing:** `sam <subcommand>` dispatches to commands; `sam` with no subcommand opens the **interactive shell** ([P0-5](#p0-5-interactive-shell-ink-home))
 - [ ] Compile check passes (`deno check`)
 
 #### P0-2: `vault/client.ts` — obsidian CLI wrapper
@@ -131,6 +133,16 @@ sam/
 - [ ] Progress bar via Ink; respect `--dry-run` (report what would be indexed)
 
 **Note:** `search/embed.ts` and `search/index.ts` are implemented here first; Phase 1 **reuses** these modules for `sam new` (no second implementation). P1-3 is “capture pipeline uses the shared search API,” not a duplicate embed layer.
+
+#### P0-5: Interactive shell (Ink home)
+
+Aligned with [Vision.md — Experience and interactivity](./Vision.md#experience-and-interactivity): `sam` should be **fun to use** and feel like a modern, responsive TUI.
+
+- [ ] **`ui/Shell.tsx`:** Ink UI that **greets** the user (short welcome + hint line for help)
+- [ ] **Slash-style routing:** e.g. user types **`/new`** (plus optional args) → run the same flow as `sam new` with parsed remainder; design for adding more routes later (`/index`, …)
+- [ ] **Responsiveness:** avoid blocking the React/Ink tree on long I/O where possible (spinner/async state); keep input feedback snappy—users expect **highly responsive** TUIs
+- [ ] **Subcommands unchanged:** `sam new`, `sam index`, … remain the scriptable/automation path; the shell is the discoverable default
+- [ ] Stub routes are acceptable until Phase 1 lands; wire **`/new`** to `commands/new.tsx` when P1-6 exists
 
 ---
 
@@ -174,6 +186,7 @@ sam/
 
 #### P1-6: Wire `commands/new.tsx`
 - [ ] Compose in order: **P1-1** ingest → **P1-2** structure → **P1-3** retrieve related notes (embed + query) → **P1-4** weave links → **P1-5** review UI
+- [ ] Ensure **`/new`** from [P0-5](#p0-5-interactive-shell-ink-home) invokes this pipeline with the same behavior as `sam new …`
 - [ ] Respect `--dry-run`: print formatted dry-run block instead of writing
 - [ ] Dry-run format matches Vision.md example exactly
 
@@ -247,6 +260,8 @@ sam/
 
 We are explicitly not building skill loading or skill export in the first implementation. The near-term product is a CLI with built-in prompting and a stable internal pipeline.
 
+A **rich Ink home shell** ([P0-5](#p0-5-interactive-shell-ink-home)) may later **conflict** with headless or skill-shaped wrappers (skills often assume non-interactive or constrained I/O). That tension is **acknowledged**; we are **not** resolving it in v1—terminal interactivity and delight take priority. Revisit when/if packaging as a skill.
+
 If we later package `sam` as a skill or skill-building tool, use these constraints:
 
 - Start from real usage traces and working operator behavior, not generic LLM advice
@@ -285,14 +300,23 @@ URL and PDF ingestion processes **untrusted** content. For v1: enforce reasonabl
 ### CI
 Run `deno task test` and `deno check` on every push/PR (exact CI product optional; minimum bar is scripted locally or in CI).
 
+### Interactive shell and TUI experience
+
+See [Vision.md — Experience and interactivity](./Vision.md#experience-and-interactivity). Goals:
+
+- **Default `sam`:** opens the Ink **home shell** (`ui/Shell.tsx`); subcommands bypass it for automation.
+- **Slash routing** (e.g. `/new …`) as the primary discoverable command surface inside the shell; extend with more routes over time.
+- **Feel:** welcoming copy, clear hints, and **responsive** UI (loading states, no “frozen” screen during slow work where avoidable).
+- **Fun:** intentional microcopy and polish so `sam` is enjoyable to open—within the same calm tone as the rest of the vision.
+
 ---
 
 ## Phase acceptance criteria (maps to [Vision.md](./Vision.md) success criteria)
 
 | Phase | Done when |
 | ----- | --------- |
-| **P0** | `sam index` runs from a vault cwd; Obsidian commands succeed with resolved `vault=` when configured; AI model resolves from flag/env/config; `deno check` clean |
-| **P1** | Raw input → structured draft → related notes → wikilink suggestions → user accept creates a note in the vault; dry-run matches Vision |
+| **P0** | `sam` opens Ink home shell with welcome + routing stub; `sam index` runs from a vault cwd; Obsidian commands succeed with resolved `vault=` when configured; AI model resolves from flag/env/config; `deno check` clean |
+| **P1** | Raw input → structured draft → related notes → wikilink suggestions → user accept creates a note in the vault; **`/new`** (home shell) and **`sam new`** both work; dry-run matches Vision |
 | **P2** | Duplicate source/file routes to canonicalize + link rewrite without breaking links; new sources reuse capture pipeline |
 | **P3** | At least one queue type processes items through the Phase 1 pipeline and moves completed work out of the queue |
 
@@ -307,7 +331,7 @@ For large vaults, full embedding on every change is expensive. **`--watch`** sho
 ## Build Order Summary
 
 ```
-P0-1 → P0-2 → P0-3a → P0-3b → P0-4   (Foundation — unblock all phases)
+P0-1 → P0-2 → P0-3a → P0-3b → P0-4 → P0-5   (Foundation + interactive home — unblock all phases)
          ↓
 P1-1 → P1-2 → P1-3 → P1-4 → P1-5 → P1-6   (Capture — core daily-use command)
          ↓

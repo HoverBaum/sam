@@ -25,6 +25,19 @@ It should:
 3. Surface potential links and context at the right moment.
 4. Keep the user in control of meaning and final decisions.
 5. Build trust through transparency and reversible actions.
+6. Feel **pleasant and fun** in the terminal—`sam` should reward daily use, not only pass a checklist.
+
+---
+
+## Experience and interactivity
+
+The primary interface is an **Ink-powered** CLI: a **responsive, modern TUI** with the snappy keyboard-driven feel people expect from contemporary tools. Running `sam` should **welcome** the user and make the next step obvious.
+
+Users should be able to work from a **home shell** with simple routing—e.g. **`/new`** (or similar) to start capture with optional arguments—so flows stay discoverable without memorizing every subcommand. **Subcommands** (`sam new`, `sam index`, …) remain for scripts, aliases, and automation.
+
+**Joy matters.** If `sam` is calm and reliable but also a little delightful to open, people will trust it with their thinking.
+
+Packaging `sam` as a portable **skill** for non-terminal environments may sit awkwardly next to a rich interactive shell; that trade-off is acknowledged and **deferred**—the day-to-day terminal experience comes first.
 
 ---
 
@@ -45,6 +58,9 @@ Fast capture matters, but long-term clarity and retrieval matter more.
 5. Grow with real practice.
 The product should evolve from actual usage patterns and real workflows, not theoretical complexity.
 
+6. **Terminal UX is a first-class product.**
+Interactivity, feedback, and responsiveness are not afterthoughts; they are how trust and habit form.
+
 ---
 
 ## Boundaries
@@ -63,6 +79,7 @@ We know this vision is being achieved when users consistently report:
 2. Fewer lost ideas and fewer unprocessed backlogs.
 3. Better recall through richer, human-approved connections.
 4. Higher confidence that the system supports thinking instead of distracting from it.
+5. The **terminal experience** feels responsive and worth opening—capture and review stay lightweight and, when appropriate, **fun**.
 
 ---
 
