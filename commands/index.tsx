@@ -1,0 +1,196 @@
+import React, { useEffect, useState } from "react";
+import { render, Text, useApp } from "ink";
+import type { CommandArgs, CommandContext } from "../types.ts";
+import { booleanFlag } from "../utils/args.ts";
+import { embed } from "../search/embed.ts";
+import {
+  assertProfileMatch,
+  classifyStaleness,
+  hashContent,
+  readManifest,
+  readStore,
+  resolveActiveProfileDir,
+  resolveProfileDir,
+  writeManifest,
+  writeStore,
+  type IndexManifest,
+} from "../search/index.ts";
+import { VaultClient } from "../vault/client.ts";
+
+function progressLine(done: number, total: number, label: string): string {
+  if (total <= 0) return `${label}: 0/0`;
+  const pct = Math.round((done / total) * 100);
+  return `${label}: ${done}/${total} (${pct}%)`;
+}
+
+function ProgressView(props: { total: number; done: number; phase: string }) {
+  return <Text>{progressLine(props.done, props.total, props.phase)}</Text>;
+}
+
+interface IndexRunState {
+  phase: string;
+  total: number;
+  done: number;
+  finished: boolean;
+  error?: string;
+}
+
+export interface IndexRunResult {
+  totalFiles: number;
+  indexedCount: number;
+  deletedCount: number;
+  skipEmbed: boolean;
+  dryRun: boolean;
+}
+
+export async function executeIndex(
+  context: CommandContext,
+  args: CommandArgs,
+  onProgress: (state: Partial<IndexRunState>) => void,
+): Promise<IndexRunResult> {
+  const rebuild = booleanFlag(args.flags, "rebuild");
+  const skipEmbed = booleanFlag(args.flags, "skip-embed");
+  const vault = new VaultClient(context.config);
+
+  onProgress({ phase: "Listing markdown files", done: 0, total: 1 });
+  const paths = (await vault.files("md")).filter((line) => line.endsWith(".md"));
+
+  const currentFiles = await Promise.all(
+    paths.map(async (path) => {
+      const code = `JSON.stringify(app.vault.getAbstractFileByPath(${JSON.stringify(path)})?.stat?.mtime ?? 0)`;
+      const mtimeText = await vault.eval(code);
+      const mtime = Number(mtimeText.replaceAll("\"", ""));
+      return { path, mtime: Number.isFinite(mtime) ? mtime : 0 };
+    }),
+  );
+
+  const activeDir = await resolveActiveProfileDir(context.config);
+  const existingManifest = await readManifest(activeDir);
+  if (existingManifest) {
+    assertProfileMatch(context.config, existingManifest);
+  }
+
+  const staleness = classifyStaleness(rebuild ? null : existingManifest, currentFiles);
+  const targets = rebuild ? currentFiles.map((f) => f.path) : [...staleness.newPaths, ...staleness.modifiedPaths];
+
+  if (context.config.dryRun) {
+    console.log("=== SAM DRY RUN ===");
+    console.log(`command: sam index`);
+    console.log(`total-files: ${paths.length}`);
+    console.log(`to-index: ${targets.length}`);
+    console.log(`deleted: ${staleness.deletedPaths.length}`);
+    console.log(`skip-embed: ${skipEmbed}`);
+    console.log("=== END DRY RUN ===");
+    return {
+      totalFiles: paths.length,
+      indexedCount: targets.length,
+      deletedCount: staleness.deletedPaths.length,
+      skipEmbed,
+      dryRun: true,
+    };
+  }
+
+  const store = await readStore(activeDir);
+  const now = Date.now();
+  const manifestFiles: Record<string, { contentHash: string; indexedAt: number }> = {
+    ...(existingManifest?.files ?? {}),
+  };
+
+  onProgress({ phase: "Indexing notes", done: 0, total: Math.max(targets.length, 1) });
+  let dimensions: number | undefined = existingManifest?.profile.dimensions;
+
+  for (let i = 0; i < targets.length; i += 1) {
+    const path = targets[i];
+    const content = await vault.read(path);
+    const contentHash = await hashContent(content);
+
+    manifestFiles[path] = { contentHash, indexedAt: now };
+
+    if (!skipEmbed) {
+      const vector = await embed(context.config, content);
+      dimensions ??= vector.length;
+      store.set(path, {
+        id: path,
+        vector,
+        metadata: { path, title: path.replace(/\.md$/, "") },
+      });
+    }
+
+    onProgress({ done: i + 1 });
+  }
+
+  for (const deletedPath of staleness.deletedPaths) {
+    delete manifestFiles[deletedPath];
+    store.delete(deletedPath);
+  }
+
+  if (!dimensions) {
+    dimensions = existingManifest?.profile.dimensions ?? 768;
+  }
+
+  const profileDir = await resolveProfileDir(context.config, dimensions);
+  const manifest: IndexManifest = {
+    profile: {
+      provider: context.config.embeddingProvider,
+      model: context.config.embeddingModel,
+      dimensions,
+    },
+    files: manifestFiles,
+  };
+
+  await writeStore(profileDir, store);
+  await writeManifest(profileDir, manifest);
+
+  onProgress({ phase: "Completed", done: Math.max(targets.length, 1), total: Math.max(targets.length, 1) });
+  return {
+    totalFiles: paths.length,
+    indexedCount: targets.length,
+    deletedCount: staleness.deletedPaths.length,
+    skipEmbed,
+    dryRun: false,
+  };
+}
+
+export async function runIndexCommand(context: CommandContext, args: CommandArgs): Promise<void> {
+  const initial: IndexRunState = {
+    phase: "Starting",
+    done: 0,
+    total: 1,
+    finished: false,
+  };
+
+  const app = render(<ProgressRunner context={context} args={args} initial={initial} />);
+  await app.waitUntilExit();
+}
+
+function ProgressRunner(
+  { context, args, initial }: { context: CommandContext; args: CommandArgs; initial: IndexRunState },
+) {
+  const { exit } = useApp();
+  const [state, setState] = useState<IndexRunState>(initial);
+
+  useEffect(() => {
+    executeIndex(context, args, (patch) => {
+      setState((previous: IndexRunState) => ({ ...previous, ...patch }));
+    })
+      .then(() => setState((previous: IndexRunState) => ({ ...previous, finished: true })))
+      .catch((error) =>
+        setState((previous: IndexRunState) => ({
+          ...previous,
+          finished: true,
+          error: String((error as Error).message ?? error),
+        }))
+      )
+      .finally(() => {
+        exit();
+      });
+  }, [context, args, exit]);
+
+  if (state.error) {
+    return <Text color="red">index failed: {state.error}</Text>;
+  }
+  if (state.finished) {
+    return <Text color="green">index complete</Text>;
+  }
+  return <ProgressView total={state.total} done={state.done} phase={state.phase} />;
+}
