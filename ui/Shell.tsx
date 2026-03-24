@@ -1,7 +1,12 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
+import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
+import SelectInput from "ink-select-input";
 import { IndexProgressLine } from "./IndexProgressLine.tsx";
 import { ConnectFlow } from "./ConnectFlow.tsx";
+import { ShellFrame } from "./ShellFrame.tsx";
+import { useTerminalRows } from "./useTerminalRows.ts";
+import { useVaultDisplay } from "./useVaultDisplay.ts";
 import type { CommandContext } from "../types.ts";
 import { executeIndex, indexShellMessages } from "../commands/index.tsx";
 import { loadConfigFile, saveConfigFile, type SamConfigFile } from "../config.ts";
@@ -18,6 +23,7 @@ interface ShellProps {
 
 interface ShellMainProps extends ShellProps {
   onOpenConnect: () => void;
+  vaultDisplay: string;
 }
 
 interface ShellMessage {
@@ -70,6 +76,8 @@ const EMBED_PROVIDER_SUGGESTIONS = ["ollama", "openai-compatible", "openai"];
 const EMBED_MODEL_SUGGESTIONS = ["nomic-embed-text", "text-embedding-3-small", "text-embedding-3-large"];
 const EMBED_BASE_URL_SUGGESTIONS = ["http://127.0.0.1:11434", "https://api.openai.com/v1"];
 
+const TRANSCRIPT_CAP = 150;
+
 function parseRoute(input: string): Route {
   const trimmed = input.trim();
   if (trimmed.startsWith("/new")) return "/new";
@@ -102,8 +110,12 @@ function trimSuggestions(values: string[]): string[] {
   return out;
 }
 
-function ShellMain({ context, onOpenConnect }: ShellMainProps) {
+function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const { setRawMode, isRawModeSupported } = useStdin();
+  const terminalRows = useTerminalRows();
+  const scrollRef = useRef<ScrollViewRef>(null);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ShellMessage[]>([
     { id: 1, text: "Welcome to sam. Try /index, /connect, or /config." },
@@ -116,9 +128,6 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
     phaseStartedAt: number;
   } | null>(null);
   const [staleHint, setStaleHint] = useState<string | null>(null);
-  const [vaultDisplay, setVaultDisplay] = useState<string>(
-    context.config.vault?.trim().length ? context.config.vault : "(resolving...)",
-  );
   const [uiMode, setUiMode] = useState<UiMode>("shell");
   const [settingsDraft, setSettingsDraft] = useState<SettingsDraft>({
     vault: context.config.vault ?? "",
@@ -127,7 +136,6 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
     embeddingModel: context.config.embeddingModel ?? "",
     embeddingBaseUrl: context.config.embeddingBaseUrl ?? "",
   });
-  const [selectedFieldIndex, setSelectedFieldIndex] = useState(0);
   const [editingField, setEditingField] = useState<SettingsField | null>(null);
   const [editBuffer, setEditBuffer] = useState("");
   const [autocompleteIndex, setAutocompleteIndex] = useState(0);
@@ -141,14 +149,33 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
     return "sam> ";
   }, [busy, indexProgress, uiMode, editingField]);
 
+  const footerContext = useMemo(() => {
+    if (busy && indexProgress) return "Indexing";
+    if (busy) return "Busy";
+    if (uiMode === "settings-edit" && editingField) {
+      return `Settings · edit ${FIELD_LABELS[editingField]}`;
+    }
+    if (uiMode === "settings-menu") return "Settings";
+    return "sam";
+  }, [busy, indexProgress, uiMode, editingField]);
+
   const pushMessage = (text: string) => {
     setMessages((prev: ShellMessage[]) => {
       const id = prev.length > 0 ? prev[prev.length - 1].id + 1 : 1;
-      return [...prev, { id, text }];
+      const next = [...prev, { id, text }];
+      return next.length > TRANSCRIPT_CAP ? next.slice(-TRANSCRIPT_CAP) : next;
     });
   };
 
-  const currentField = FIELD_ORDER[selectedFieldIndex];
+  const settingsItems = useMemo(
+    () =>
+      FIELD_ORDER.map((field) => ({
+        label: `${FIELD_LABELS[field]}: ${settingsDraft[field] || "(empty)"}`,
+        value: field,
+      })),
+    [settingsDraft],
+  );
+
   const autoSuggestions = useMemo(() => {
     if (!editingField) return [];
     if (editingField === "vault") return trimSuggestions(vaultSuggestions);
@@ -158,28 +185,28 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
     return trimSuggestions(EMBED_BASE_URL_SUGGESTIONS);
   }, [editingField, vaultSuggestions]);
 
+  useLayoutEffect(() => {
+    scrollRef.current?.scrollToBottom();
+  }, [messages]);
+
+  /** Re-enable raw mode after `ink-select-input` unmounts (its useInput cleanup calls setRawMode(false)). */
+  useLayoutEffect(() => {
+    if (!isRawModeSupported) return;
+    setRawMode(true);
+  }, [uiMode, isRawModeSupported, setRawMode]);
+
+  useEffect(() => {
+    const onResize = () => scrollRef.current?.remeasure();
+    stdout?.on?.("resize", onResize);
+    return () => {
+      stdout?.off?.("resize", onResize);
+    };
+  }, [stdout]);
+
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       const vault = new VaultClient(context.config);
-
-      try {
-        const currentName = await vault.currentVaultName();
-        if (!cancelled) {
-          setVaultDisplay(currentName);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          const message = String((error as Error).message ?? error);
-          if (message.includes(OBSIDIAN_CONNECTION_ERROR)) {
-            setVaultDisplay("(unavailable: open Obsidian)");
-          } else if (message.includes(OBSIDIAN_MISSING_ERROR)) {
-            setVaultDisplay("(unavailable: CLI missing)");
-          } else {
-            setVaultDisplay("(unavailable)");
-          }
-        }
-      }
 
       try {
         const names = await vault.listVaultNames();
@@ -226,11 +253,10 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
     const draft = draftFromConfig(file, context);
     setSettingsDraft(draft);
     setUiMode("settings-menu");
-    setSelectedFieldIndex(0);
     setEditingField(null);
     setEditBuffer("");
     setAutocompleteIndex(0);
-    pushMessage("🎛️  Settings opened. Use ↑/↓ to pick, Enter to edit, S to save, Esc to cancel.");
+    pushMessage("🎛️  Settings opened. ↑/↓ or j/k · Enter edit · S save · Esc cancel.");
   };
 
   const beginEditingField = (field: SettingsField) => {
@@ -238,7 +264,7 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
     setEditBuffer(settingsDraft[field] ?? "");
     setAutocompleteIndex(0);
     setUiMode("settings-edit");
-    pushMessage(`Editing ${FIELD_LABELS[field]}. Press Tab for suggestions, Enter to apply.`);
+    pushMessage(`Editing ${FIELD_LABELS[field]}. Tab suggestions · Enter apply · Esc cancel.`);
   };
 
   const saveSettings = async () => {
@@ -259,192 +285,217 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
 
   const applyEditedValue = () => {
     if (!editingField) return;
+    const field = editingField;
     setSettingsDraft((prev: SettingsDraft) => ({
       ...prev,
-      [editingField]: editBuffer.trim(),
+      [field]: editBuffer.trim(),
     }));
     setUiMode("settings-menu");
     setEditingField(null);
-    pushMessage(`${FIELD_LABELS[editingField]} updated.`);
+    pushMessage(`${FIELD_LABELS[field]} updated.`);
   };
 
-  useInput(async (char, key) => {
-    if (busy) return;
-    if (key.ctrl && char === "c") {
-      exit();
-      return;
-    }
+  useInput(
+    async (char, key) => {
+      if (busy) return;
+      if (key.ctrl && char === "c") {
+        exit();
+        return;
+      }
 
-    if (uiMode === "settings-edit") {
-      if (key.escape) {
-        setUiMode("settings-menu");
-        setEditingField(null);
-        setEditBuffer("");
-        pushMessage("Edit canceled.");
+      if (uiMode === "settings-edit") {
+        if (key.escape) {
+          setUiMode("settings-menu");
+          setEditingField(null);
+          setEditBuffer("");
+          pushMessage("Edit canceled.");
+          return;
+        }
+        if (key.return) {
+          applyEditedValue();
+          return;
+        }
+        if (key.tab && autoSuggestions.length > 0) {
+          const next = autoSuggestions[autocompleteIndex % autoSuggestions.length];
+          setEditBuffer(next);
+          setAutocompleteIndex((idx: number) => (idx + 1) % autoSuggestions.length);
+          return;
+        }
+        if (key.backspace || key.delete) {
+          setEditBuffer((prev: string) => prev.slice(0, -1));
+          return;
+        }
+        if (char) {
+          setEditBuffer((prev: string) => prev + char);
+        }
         return;
       }
+
+      if (uiMode === "settings-menu") {
+        if (key.escape) {
+          setUiMode("shell");
+          pushMessage("Settings closed (no save).");
+          return;
+        }
+        if (char?.toLowerCase() === "s") {
+          try {
+            await saveSettings();
+          } catch (error) {
+            pushMessage(`Failed to save settings: ${String((error as Error).message ?? error)}`);
+          }
+          return;
+        }
+        return;
+      }
+
       if (key.return) {
-        applyEditedValue();
+        const route = parseRoute(input);
+        const raw = input.trim();
+        setInput("");
+
+        if (route === "" && raw === "") {
+          return;
+        }
+
+        if (route === "/config") {
+          try {
+            await startSettingsMenu();
+          } catch (error) {
+            pushMessage(`Failed to open settings: ${String((error as Error).message ?? error)}`);
+          }
+          return;
+        }
+        if (route === "") {
+          pushMessage("Unknown command. Try /help.");
+          return;
+        }
+        if (route === "help") {
+          pushMessage("Routes: /new, /index, /connect, /config (/settings alias), /help. Ctrl+C exits.");
+          return;
+        }
+        if (route === "/connect") {
+          onOpenConnect();
+          return;
+        }
+        if (route === "/new") {
+          pushMessage("/new is planned for Phase 1.");
+          return;
+        }
+        if (route === "/index") {
+          setBusy(true);
+          setIndexProgress({ phase: "Starting", done: 0, total: 1, phaseStartedAt: Date.now() });
+          pushMessage("Starting index run...");
+          try {
+            const result = await executeIndex(
+              context,
+              { flags: {}, positionals: [] },
+              (patch) => {
+                setIndexProgress((prev) => {
+                  const base = prev ?? { phase: "Starting", done: 0, total: 1, phaseStartedAt: Date.now() };
+                  return {
+                    phase: patch.phase ?? base.phase,
+                    done: patch.done ?? base.done,
+                    total: patch.total ?? base.total,
+                    phaseStartedAt: patch.phaseStartedAt ?? base.phaseStartedAt,
+                  };
+                });
+              },
+              { continueOnEmbedError: true },
+            );
+            for (const message of indexShellMessages(result)) {
+              pushMessage(message);
+            }
+          } catch (error) {
+            const message = String((error as Error).message ?? error);
+            if (message.includes(OBSIDIAN_CONNECTION_ERROR)) {
+              pushMessage("Index failed: Obsidian is not connected. Open Obsidian and retry.");
+            } else if (message.includes(OBSIDIAN_MISSING_ERROR)) {
+              pushMessage("Index failed: Obsidian CLI not found in PATH.");
+            } else {
+              pushMessage(`Index failed: ${message}`);
+            }
+          } finally {
+            setBusy(false);
+            setIndexProgress(null);
+          }
+          return;
+        }
+        if (raw) {
+          pushMessage("Unknown command. Try /help.");
+        }
         return;
       }
-      if (key.tab && autoSuggestions.length > 0) {
-        const next = autoSuggestions[autocompleteIndex % autoSuggestions.length];
-        setEditBuffer(next);
-        setAutocompleteIndex((idx: number) => (idx + 1) % autoSuggestions.length);
-        return;
-      }
+
       if (key.backspace || key.delete) {
-        setEditBuffer((prev: string) => prev.slice(0, -1));
+        setInput((prev: string) => prev.slice(0, -1));
         return;
       }
       if (char) {
-        setEditBuffer((prev: string) => prev + char);
+        setInput((prev: string) => prev + char);
       }
-      return;
-    }
+    },
+  );
 
-    if (uiMode === "settings-menu") {
-      if (key.escape) {
-        setUiMode("shell");
-        pushMessage("Settings closed (no save).");
-        return;
-      }
-      if (key.upArrow) {
-        setSelectedFieldIndex((idx: number) => (idx <= 0 ? FIELD_ORDER.length - 1 : idx - 1));
-        return;
-      }
-      if (key.downArrow) {
-        setSelectedFieldIndex((idx: number) => (idx + 1) % FIELD_ORDER.length);
-        return;
-      }
-      if (key.return) {
-        beginEditingField(currentField);
-        return;
-      }
-      if (char?.toLowerCase() === "s") {
-        try {
-          await saveSettings();
-        } catch (error) {
-          pushMessage(`Failed to save settings: ${String((error as Error).message ?? error)}`);
-        }
-        return;
-      }
-      return;
-    }
-
-    if (key.return) {
-      const route = parseRoute(input);
-      const raw = input.trim();
-      setInput("");
-
-      if (route === "/config") {
-        try {
-          await startSettingsMenu();
-        } catch (error) {
-          pushMessage(`Failed to open settings: ${String((error as Error).message ?? error)}`);
-        }
-        return;
-      }
-      if (route === "") {
-        pushMessage("Unknown command. Try /help.");
-        return;
-      }
-      if (route === "help") {
-        pushMessage("Routes: /new, /index, /connect, /config (/settings alias), /help. Ctrl+C exits.");
-        return;
-      }
-      if (route === "/connect") {
-        onOpenConnect();
-        return;
-      }
-      if (route === "/new") {
-        pushMessage("/new is planned for Phase 1.");
-        return;
-      }
-      if (route === "/index") {
-        setBusy(true);
-        setIndexProgress({ phase: "Starting", done: 0, total: 1, phaseStartedAt: Date.now() });
-        pushMessage("Starting index run...");
-        try {
-          const result = await executeIndex(
-            context,
-            { flags: {}, positionals: [] },
-            (patch) => {
-              setIndexProgress((prev) => {
-                const base = prev ?? { phase: "Starting", done: 0, total: 1, phaseStartedAt: Date.now() };
-                return {
-                  phase: patch.phase ?? base.phase,
-                  done: patch.done ?? base.done,
-                  total: patch.total ?? base.total,
-                  phaseStartedAt: patch.phaseStartedAt ?? base.phaseStartedAt,
-                };
-              });
-            },
-            { continueOnEmbedError: true },
-          );
-          for (const message of indexShellMessages(result)) {
-            pushMessage(message);
-          }
-        } catch (error) {
-          const message = String((error as Error).message ?? error);
-          if (message.includes(OBSIDIAN_CONNECTION_ERROR)) {
-            pushMessage("Index failed: Obsidian is not connected. Open Obsidian and retry.");
-          } else if (message.includes(OBSIDIAN_MISSING_ERROR)) {
-            pushMessage("Index failed: Obsidian CLI not found in PATH.");
-          } else {
-            pushMessage(`Index failed: ${message}`);
-          }
-        } finally {
-          setBusy(false);
-          setIndexProgress(null);
-        }
-        return;
-      }
-      if (raw) {
-        pushMessage("Unknown command. Try /help.");
-      }
-      return;
-    }
-
-    if (key.backspace || key.delete) {
-      setInput((prev: string) => prev.slice(0, -1));
-      return;
-    }
-    if (char) {
-      setInput((prev: string) => prev + char);
-    }
-  });
+  const promptValue = uiMode === "settings-edit" ? editBuffer : input;
 
   return (
-    <Box flexDirection="column">
-      <Text color="cyan">sam — personal knowledge companion</Text>
-      <Text dimColor>Vault: {vaultDisplay}</Text>
-      <Text dimColor>Type /help for routes.</Text>
-      {staleHint ? <Text color="yellow">{staleHint}</Text> : null}
+    <ShellFrame
+      variant="home"
+      terminalRows={terminalRows}
+      footerVault={vaultDisplay}
+      footerContext={footerContext}
+      prompt={prompt}
+      promptValue={promptValue}
+    >
+      {uiMode === "shell"
+        ? (
+          <Box flexShrink={0}>
+            <Text dimColor>Type /help for routes.</Text>
+          </Box>
+        )
+        : null}
+      {staleHint
+        ? (
+          <Box flexShrink={0}>
+            <Text color="yellow">{staleHint}</Text>
+          </Box>
+        )
+        : null}
+
+      <Box
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={4}
+        width="100%"
+        overflow="hidden"
+        flexDirection="column"
+      >
+        <ScrollView ref={scrollRef}>
+          {messages.map((msg: ShellMessage) => (
+            <Text key={msg.id}>{msg.text}</Text>
+          ))}
+        </ScrollView>
+      </Box>
 
       {uiMode === "settings-menu"
         ? (
-          <Box marginTop={1} flexDirection="column">
+          <Box marginTop={1} flexDirection="column" flexShrink={0}>
             <Text color="magenta">⚙️  Settings</Text>
-            <Text dimColor>Enter edit • S save • Esc cancel</Text>
-            {FIELD_ORDER.map((field, idx) => {
-              const marker = idx === selectedFieldIndex ? "❯" : " ";
-              const value = settingsDraft[field] || "(empty)";
-              return (
-                <Text key={field}>
-                  {marker} {FIELD_LABELS[field]}: {value}
-                </Text>
-              );
-            })}
+            <Text dimColor>Enter edit · S save · Esc cancel · 1–5 jump</Text>
+            <SelectInput
+              items={settingsItems}
+              onSelect={(item) => beginEditingField(item.value as SettingsField)}
+              limit={6}
+            />
           </Box>
         )
         : null}
 
       {uiMode === "settings-edit" && editingField
         ? (
-          <Box marginTop={1} flexDirection="column">
+          <Box marginTop={1} flexDirection="column" flexShrink={0}>
             <Text color="green">Editing {FIELD_LABELS[editingField]}</Text>
-            <Text dimColor>Tab autocomplete • Enter apply • Esc cancel</Text>
+            <Text dimColor>Tab autocomplete · Enter apply · Esc cancel</Text>
             <Text>{editBuffer}</Text>
             {autoSuggestions.length > 0
               ? (
@@ -457,14 +508,9 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
         )
         : null}
 
-      <Box marginTop={1} flexDirection="column">
-        {messages.slice(-6).map((msg: ShellMessage) => (
-          <Text key={msg.id}>{msg.text}</Text>
-        ))}
-      </Box>
       {busy && indexProgress
         ? (
-          <Box marginTop={1}>
+          <Box marginTop={1} flexShrink={0}>
             <IndexProgressLine
               phase={indexProgress.phase}
               done={indexProgress.done}
@@ -474,18 +520,28 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
           </Box>
         )
         : null}
-      <Text>
-        {prompt}
-        {uiMode === "settings-edit" ? editBuffer : input}
-      </Text>
-    </Box>
+    </ShellFrame>
   );
 }
 
 export function Shell(props: ShellProps) {
   const [flow, setFlow] = useState<"main" | "connect">("main");
+  const vaultDisplay = useVaultDisplay(props.context);
+
   if (flow === "connect") {
-    return <ConnectFlow context={props.context} onExit={() => setFlow("main")} />;
+    return (
+      <ConnectFlow
+        context={props.context}
+        vaultDisplay={vaultDisplay}
+        onExit={() => setFlow("main")}
+      />
+    );
   }
-  return <ShellMain context={props.context} onOpenConnect={() => setFlow("connect")} />;
+  return (
+    <ShellMain
+      context={props.context}
+      vaultDisplay={vaultDisplay}
+      onOpenConnect={() => setFlow("connect")}
+    />
+  );
 }

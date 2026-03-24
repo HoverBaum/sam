@@ -8,7 +8,13 @@ import {
   resolveActiveProfileDir,
 } from "../search/index.ts";
 import { ConnectFlow } from "../ui/ConnectFlow.tsx";
+import { useVaultDisplay } from "../ui/useVaultDisplay.ts";
 import { VaultClient } from "../vault/client.ts";
+
+function ConnectWithVault(props: { context: CommandContext; onExit: () => void }) {
+  const vaultDisplay = useVaultDisplay(props.context);
+  return <ConnectFlow context={props.context} vaultDisplay={vaultDisplay} onExit={props.onExit} />;
+}
 
 async function maybePrintStalenessWarning(context: CommandContext): Promise<void> {
   try {
@@ -50,7 +56,7 @@ export async function runConnectCommand(context: CommandContext, args: CommandAr
   }
 
   const instance = render(
-    <ConnectFlow
+    <ConnectWithVault
       context={context}
       onExit={() => {
         instance.unmount();

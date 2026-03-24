@@ -21,6 +21,7 @@ import {
 } from "../search/index.ts";
 import { type FileStatEntry, VaultClient } from "../vault/client.ts";
 const DEFAULT_FAILURE_SAMPLE_LIMIT = 3;
+const DEFAULT_EMPTY_PATH_SAMPLE_LIMIT = 3;
 const INDEX_EMBED_CONCURRENCY = 4;
 
 function ProgressView(props: { total: number; done: number; phase: string; phaseStartedAt: number }) {
@@ -53,7 +54,8 @@ export interface IndexRunResult {
   indexedCount: number;
   deletedCount: number;
   failedCount: number;
-  emptySkippedCount: number;
+  /** Vault paths of notes skipped because they had no content (length 0). */
+  emptySkippedPaths: string[];
   failureSamples: IndexFailure[];
   skipEmbed: boolean;
   dryRun: boolean;
@@ -121,18 +123,29 @@ function formatEmbeddingFailure(config: RuntimeConfig, path: string, error: unkn
   return `Skipped ${path}: ${message}`;
 }
 
-function emptyNotesMessage(count: number): string {
-  return count === 1
-    ? "Skipped 1 empty note — it has no content to index."
-    : `Skipped ${count} empty notes — they have no content to index.`;
+function emptySkipMessages(paths: string[]): string[] {
+  if (paths.length === 0) return [];
+  const limit = DEFAULT_EMPTY_PATH_SAMPLE_LIMIT;
+  const lines = paths.slice(0, limit).map(
+    (p) => `Skipped empty note: ${p} — no content to index.`,
+  );
+  const remaining = paths.length - limit;
+  if (remaining > 0) {
+    lines.push(
+      remaining === 1
+        ? "1 more empty note was skipped."
+        : `${remaining} more empty notes were skipped.`,
+    );
+  }
+  return lines;
 }
 
 export function indexShellMessages(result: IndexRunResult): string[] {
-  const emptyNote = result.emptySkippedCount > 0 ? emptyNotesMessage(result.emptySkippedCount) : null;
+  const emptyLines = emptySkipMessages(result.emptySkippedPaths);
 
   if (result.failedCount === 0) {
     const lines = [`Index run finished (${result.indexedCount} indexed, ${result.deletedCount} removed).`];
-    if (emptyNote) lines.push(emptyNote);
+    lines.push(...emptyLines);
     return lines;
   }
 
@@ -148,7 +161,7 @@ export function indexShellMessages(result: IndexRunResult): string[] {
         : `${remaining} more notes were skipped during indexing.`,
     );
   }
-  if (emptyNote) messages.push(emptyNote);
+  messages.push(...emptyLines);
   return messages;
 }
 
@@ -188,7 +201,7 @@ export async function executeIndex(
       indexedCount: summary.indexedFiles,
       deletedCount: 0,
       failedCount: 0,
-      emptySkippedCount: 0,
+      emptySkippedPaths: [],
       failureSamples: [],
       skipEmbed,
       dryRun: true,
@@ -215,7 +228,7 @@ export async function executeIndex(
   const failureSamples: IndexFailure[] = [];
   let failedCount = 0;
   let indexedCount = 0;
-  let emptySkippedCount = 0;
+  const emptySkippedPaths: string[] = [];
 
   const targetTotal = Math.max(targets.length, 1);
   onProgress(progressPatch(now, { phase: "Indexing notes", done: 0, total: targetTotal }));
@@ -261,7 +274,7 @@ export async function executeIndex(
 
   for (const result of targetResults) {
     if ("skippedEmpty" in result) {
-      emptySkippedCount += 1;
+      emptySkippedPaths.push(result.path);
       delete manifestFiles[result.path];
       store.delete(result.path);
       continue;
@@ -322,7 +335,7 @@ export async function executeIndex(
     indexedCount,
     deletedCount: staleness.deletedPaths.length,
     failedCount,
-    emptySkippedCount,
+    emptySkippedPaths,
     failureSamples,
     skipEmbed,
     dryRun: false,
