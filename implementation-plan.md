@@ -12,12 +12,12 @@
 | Terminal UI     | **Ink** (React for CLIs)                    | **Home shell** (welcome + routing), review screens, link pickers; aim for a **highly responsive** TUI—see [Interactive shell and TUI](#interactive-shell-and-tui-experience) |
 | AI              | **Vercel AI SDK** (`ai` on npm + `@ai-sdk/*` providers) | Unified provider abstraction (Claude, OpenAI, Gemini, Groq, Mistral, etc.); `generateObject` / `generateText`, streaming, tool calling; selected by config or `--model` flag |
 | Embeddings      | **Pluggable providers** (default: **Ollama** + `nomic-embed-text`) | Users pick local **Ollama**, **OpenAI**-style HTTP APIs, or other OpenAI-compatible endpoints; same interface from `search/embed.ts`—see [Embedding configuration](#embedding-configuration-and-index-isolation) |
-| Vector index    | **vectra** (JSON-backed)                    | Simple local index, no server needed; **one index directory per embedding profile** so dimensions/providers never mix silently                                                                                                        |
+| Vector index    | **JSON-backed index** (`search/index.ts`; cosine over stored vectors) | P0 ships without **vectra**; same goals—local store, **one directory per embedding profile**—implemented as `index.json` + manifest. Adopting vectra later is optional.                                                                                                        |
 | Vault I/O       | **Obsidian CLI** (Obsidian 1.12+ installer) | Official interface; keeps sync/conflict handling in Obsidian. Command reference: [Obsidian CLI (bundled)](./external-docs/Obsidian-cli-docs.md)                          |
 | Source fetching | **fetch + pdf-parse**                       | URL content and PDF text extraction                                                                                                                                     |
 | Prompting       | **Built-in prompts** (`ai/instructions.ts`) | Keep note-creation behavior versioned in product code for now                                                                                                           |
 
-**Documentation pointers (keep in sync while building):** [Deno — npm packages](https://docs.deno.com/runtime/fundamentals/node_modules/) · [Vercel AI SDK](https://sdk.vercel.ai/docs) · [Ink](https://github.com/vadimdemedes/ink) · [vectra](https://github.com/nicklockwood/vectra) · [Ollama API](https://github.com/ollama/ollama/blob/main/docs/api.md) · [OpenAI Embeddings](https://platform.openai.com/docs/guides/embeddings) (for API-style providers)
+**Documentation pointers (keep in sync while building):** [Deno — npm packages](https://docs.deno.com/runtime/fundamentals/node_modules/) · [Vercel AI SDK](https://sdk.vercel.ai/docs) · [Ink](https://github.com/vadimdemedes/ink) · [vectra](https://github.com/nicklockwood/vectra) (optional future) · [Ollama API](https://github.com/ollama/ollama/blob/main/docs/api.md) · [OpenAI Embeddings](https://platform.openai.com/docs/guides/embeddings) (for API-style providers)
 
 ---
 
@@ -72,7 +72,7 @@
 
 - **Pluggable backends** in `search/embed.ts`: at minimum **Ollama** (REST `/api/embeddings`) and **OpenAI-compatible** HTTPS endpoints that accept an embeddings request with API key when needed. Same exported `embed(text): Promise<number[]>` for `sam index` and capture (P1-3).
 - **Resolution order** for embedding settings (most specific wins), analogous to chat model resolution: `--embed-model` (and embedding-specific flags if any) → `SAM_EMBED_MODEL` / `SAM_EMBED_BASE_URL` / `SAM_EMBED_API_KEY` as applicable → `~/.sam/config.json` → **defaults** (Ollama + `nomic-embed-text` at the default Ollama host).
-- **Index path:** store vectra data under `~/.sam/index/<embedding-profile>/`, where `embedding-profile` is a stable id derived from **provider + model + vector dimension** (e.g. hash or slug). Changing provider/model must **not** silently reuse an index built with different dimensions—either re-embed into a new profile directory or explicit `sam index --rebuild` (exact flag name TBD).
+- **Index path:** store index data (`manifest.json`, `index.json`) under `~/.sam/index/<embedding-profile>/`, where `embedding-profile` is a stable id derived from **provider + model + vector dimension** (e.g. hash or slug). Changing provider/model must **not** silently reuse an index built with different dimensions—either re-embed into a new profile directory or explicit `sam index --rebuild`.
 - **Switching providers** is a first-class user choice (local free vs cloud quality/latency); document tradeoffs in README.
 
 ---
@@ -85,7 +85,7 @@ sam/
 ├── config.ts                 # Load ~/.sam/config.json; merge flags/env (vault, model, embedding*, …)
 ├── commands/
 │   ├── new.tsx               # Capture pipeline (handles plain text, URL, file, $EDITOR)
-│   ├── index.ts              # Vault indexer with incremental manifest-based updates
+│   ├── index.tsx             # Vault indexer with incremental manifest-based updates (Ink progress)
 │   └── process.tsx           # Inbox processor
 ├── ai/
 │   ├── config.ts             # Model/API key selection and resolution
@@ -94,7 +94,7 @@ sam/
 │   └── link.ts               # AI: draft + candidates → wikilinks (generateText)
 ├── search/
 │   ├── embed.ts              # Embedding provider adapters (Ollama, OpenAI-compatible, …)
-│   └── index.ts              # vectra build / update / query; manifest-based incremental updates
+│   └── index.ts              # JSON index + cosine query; manifest-based incremental updates
 ├── vault/
 │   └── client.ts             # Thin wrapper over obsidian CLI (all vault I/O goes through here)
 ├── scripts/
@@ -114,52 +114,54 @@ sam/
 
 **Goal:** Runnable scaffold. Every downstream phase builds on this.
 
+**Status (verified 2026-03-24):** P0 is **implemented** in-repo. `deno check` and `deno task test` pass. Known deviations from the original checklist wording are called out under each task (custom JSON vector store vs vectra; incremental scheduling uses **mtime vs manifest `indexedAt`**, then content hash on ingest—not hash-only scheduling; `sam index --dry-run` prints a manifest-level preview without enumerating vault files).
+
 ### Tasks
 
 #### P0-1: Project scaffold
-- [ ] `deno.json` with tasks: `dev`, `build`, `test`
-- [ ] Import map pointing to npm specifiers for `ai`, `@ai-sdk/*` providers, Ink, and other deps as needed
-- [ ] `cli.tsx` entry with global flags: `--dry-run`, `--model`, `--vault`, `--embed-model` (and env counterparts for embeddings—see [Embedding configuration](#embedding-configuration-and-index-isolation))
-- [ ] Load and merge `~/.sam/config.json` (create schema with defaults for missing keys)
-- [ ] **Routing:** `sam <subcommand>` dispatches to commands; `sam` with no subcommand opens the **interactive shell** ([P0-5](#p0-5-interactive-shell-ink-home))
-- [ ] Compile check passes (`deno check`)
+- [x] `deno.json` with tasks: `dev`, `build`, `test` (plus `check`: `deno check cli.tsx`)
+- [x] Import map pointing to npm specifiers for `ai`, `@ai-sdk/*` providers, Ink, and other deps as needed
+- [x] `cli.tsx` entry with global flags: `--dry-run`, `--model`, `--vault`, `--embed-model` (and env counterparts for embeddings—see [Embedding configuration](#embedding-configuration-and-index-isolation); also `--embed-base-url`, `--embed-provider`, `--embed-api-key`)
+- [x] Load and merge `~/.sam/config.json` (create schema with defaults for missing keys) — `config.ts` (`RuntimeConfig`)
+- [x] **Routing:** `sam <subcommand>` dispatches to commands; `sam` with no subcommand opens the **interactive shell** ([P0-5](#p0-5-interactive-shell-ink-home))
+- [x] Compile check passes (`deno check`)
 
 #### P0-2: `vault/client.ts` — obsidian CLI wrapper
-- [ ] Resolve vault for every invocation using: `--vault` → `SAM_VAULT` → `config.vault` → omit (cwd / active vault); pass `vault=<name|id>` as **first** token when set ([Obsidian CLI docs](./external-docs/Obsidian-cli-docs.md))
-- [ ] Shell out to `obsidian` CLI for vault operations per bundled reference (e.g. `create`, `open`, `move`, `files`, `read`; exact names/params per [Obsidian CLI docs](./external-docs/Obsidian-cli-docs.md))
-- [ ] **Backlinks & link graph:**
+- [x] Resolve vault for every invocation using: `--vault` → `SAM_VAULT` → `config.vault` → omit (cwd / active vault); pass `vault=<name|id>` as **first** token when set ([Obsidian CLI docs](./external-docs/Obsidian-cli-docs.md))
+- [x] Shell out to `obsidian` CLI for vault operations per bundled reference (e.g. `create`, `open`, `move`, `files`, `read`; exact names/params per [Obsidian CLI docs](./external-docs/Obsidian-cli-docs.md))
+- [x] **Backlinks & link graph:**
   - `backlinks(file): Promise<BacklinkEntry[]>` — who links to a note (`file=` or `path=`, `format=json`)
   - `links(file): Promise<LinkEntry[]>` — outgoing links from a note
   - `unresolved(): Promise<UnresolvedLink[]>` — vault-wide unresolved links
   - `orphans(): Promise<string[]>` — notes with no incoming links
   - `deadends(): Promise<string[]>` — notes with no outgoing links
-- [ ] Accept `--dry-run`: log intended command, skip execution
-- [ ] Typed return values; throw on non-zero exit; **normalize** Obsidian CLI `format=json` output into stable TypeScript types (`BacklinkEntry`, `LinkEntry`, …) so callers do not depend on raw CLI field-name drift—document expected shapes next to types.
+- [x] Accept `--dry-run`: log intended command, skip execution
+- [x] Typed return values; throw on non-zero exit; **normalize** Obsidian CLI `format=json` output into stable TypeScript types (`BacklinkEntry`, `LinkEntry`, …) so callers do not depend on raw CLI field-name drift—document expected shapes next to types.
 
 #### P0-3a: `ai/config.ts` + embedding resolution (shared `config`)
-- [ ] Define config shape aligned with `~/.sam/config.json`: chat fields `{ model, apiKey?, baseUrl?, vault?, vaultPath? }` plus embedding fields `{ embeddingModel?, embeddingProvider?, embeddingBaseUrl?, embeddingApiKey? }` (shared `config` module for `vault/client.ts`, `ai/config.ts`, and `search/embed.ts`)
-- [ ] **Chat** model selection order: `--model` → `SAM_AI_MODEL` → config → default (`anthropic/claude-3-5-sonnet-20241022`)
-- [ ] **Embedding** selection order: `--embed-model` (plus embedding env vars) → config → default (Ollama + `nomic-embed-text`); see [Embedding configuration](#embedding-configuration-and-index-isolation)
-- [ ] Support Vercel AI SDK model IDs: `anthropic/claude-*`, `openai/*`, `google/*`, `mistral/*`, `groq/*`, etc.
-- [ ] For local chat models: support OpenAI-compatible `baseUrl` (e.g., LM Studio); distinct from `embeddingBaseUrl` when both are set
-- [ ] All `ai/` modules import from the `ai` package and provider packages (`@ai-sdk/anthropic`, …) only through a thin layer in `ai/config.ts` where practical; avoid scattering provider SDK imports
-- [ ] `search/embed.ts`: implement provider adapters and route by resolved embedding config; **no** duplicate embed stacks in Phase 1
+- [x] Define config shape aligned with `~/.sam/config.json`: chat fields `{ model, apiKey?, baseUrl?, vault?, vaultPath? }` plus embedding fields `{ embeddingModel?, embeddingProvider?, embeddingBaseUrl?, embeddingApiKey? }` — shared **`config.ts`** (runtime merge) plus `ai/config.ts` (`resolveChatModelTarget`) and `search/embed.ts`
+- [x] **Chat** model selection order: `--model` → `SAM_AI_MODEL` → config → default (`anthropic/claude-3-5-sonnet-20241022`)
+- [x] **Embedding** selection order: `--embed-model` (plus embedding env vars) → config → default (Ollama + `nomic-embed-text`); see [Embedding configuration](#embedding-configuration-and-index-isolation)
+- [x] Support Vercel AI SDK model IDs: `anthropic/claude-*`, `openai/*`, `google/*`, `mistral/*`, `groq/*`, etc.
+- [x] For local chat models: support OpenAI-compatible `baseUrl` (e.g., LM Studio); distinct from `embeddingBaseUrl` when both are set
+- [x] All `ai/` modules import from the `ai` package and provider packages (`@ai-sdk/anthropic`, …) only through a thin layer in `ai/config.ts` where practical; avoid scattering provider SDK imports — **P0:** import map ready; `generateObject` / provider construction lands with Phase 1 (`ai/structure.ts`, `ai/link.ts`). No stray `@ai-sdk/*` imports outside planned modules.
+- [x] `search/embed.ts`: implement provider adapters and route by resolved embedding config; **no** duplicate embed stacks in Phase 1
 
 #### P0-3b: `ai/instructions.ts` — built-in prompt assembly
-- [ ] Define the core system prompt for note structuring and link-weaving
-- [ ] Keep prompt text versioned in the repo, not loaded from external skill files
-- [ ] Support provider/model-specific tweaks in code where needed
-- [ ] Return prompt fragments/helpers that `ai/structure.ts` and `ai/link.ts` can reuse
+- [x] Define the core system prompt for note structuring and link-weaving
+- [x] Keep prompt text versioned in the repo, not loaded from external skill files
+- [x] Support provider/model-specific tweaks in code where needed
+- [x] Return prompt fragments/helpers that `ai/structure.ts` and `ai/link.ts` can reuse
 
-#### P0-4: `sam index` command (`commands/index.ts`)
-- [ ] List vault markdown files via `obsidian files ext=md` (same vault resolution as [Configuration and vault resolution](#configuration-and-vault-resolution)); read each file's content via `obsidian read path=<path>` — **no direct filesystem reads**; all vault I/O goes through `vault/client.ts`
-- [ ] Embed each note with `search/embed.ts` using the **resolved embedding provider** (not hard-coded Ollama)
-- [ ] Upsert into `search/index.ts` (vectra JSON index under `~/.sam/index/<embedding-profile>/`; metadata includes note path, title/summary for retrieval)
-- [ ] **Manifest:** after each run, write/update `~/.sam/index/<embedding-profile>/manifest.json` with shape `{ profile: { provider, model, dimensions }, files: { [vaultPath]: { contentHash, indexedAt } } }`; on subsequent runs, **only re-embed files whose `contentHash` has changed**; remove entries for deleted paths; add new paths — never do a full re-embed unless `--rebuild` is passed
-- [ ] **Profile staleness guard:** before any index query, if the resolved embedding config does not match `manifest.profile`, refuse to use the index and tell the user to run `sam index --rebuild`; never silently query an index built with different provider/model/dimensions
-- [ ] `--skip-embed`: update the manifest file list (new/deleted paths) without calling the embedding backend; useful offline or when API key is unavailable
-- [ ] `--rebuild`: force full re-embed of all files regardless of manifest state (required after provider/model change)
-- [ ] Progress bar via Ink; respect `--dry-run` (report what would be indexed, no writes)
+#### P0-4: `sam index` command (`commands/index.tsx`)
+- [x] List vault markdown files via `obsidian files ext=md` (same vault resolution as [Configuration and vault resolution](#configuration-and-vault-resolution)); read each file's content via `obsidian read path=<path>` — **no direct filesystem reads**; all vault I/O goes through `vault/client.ts`
+- [x] Embed each note with `search/embed.ts` using the **resolved embedding provider** (not hard-coded Ollama)
+- [x] Upsert into `search/index.ts` (**JSON** index `index.json` under `~/.sam/index/<embedding-profile>/`; metadata includes note path, title/summary for retrieval) — **not vectra** in P0; see Tech Stack row
+- [x] **Manifest:** after each run, write/update `~/.sam/index/<embedding-profile>/manifest.json` with shape `{ profile: { provider, model, dimensions }, files: { [vaultPath]: { contentHash, indexedAt } } }`; **incremental work queue** uses **mtime vs `indexedAt`** (and new/deleted paths); content hash is stored and updated on each indexed file — **not** “skip re-embed until hash differs” scheduling; use `--rebuild` for full re-embed
+- [x] **Profile staleness guard:** before any index query, if the resolved embedding config does not match `manifest.profile`, refuse to use the index and tell the user to run `sam index --rebuild`; never silently query an index built with different provider/model/dimensions
+- [x] `--skip-embed`: update the manifest file list (new/deleted paths) without calling the embedding backend; useful offline or when API key is unavailable
+- [x] `--rebuild`: force full re-embed of all files regardless of manifest state (required after provider/model change)
+- [x] Progress via Ink; `--dry-run` exits early with a **summary** block (no vault enumeration in dry-run)
 
 **Note:** `search/embed.ts` and `search/index.ts` are implemented here first; Phase 1 **reuses** these modules for `sam new` (no second implementation). P1-3 is “capture pipeline uses the shared search API,” not a duplicate embed layer.
 
@@ -167,12 +169,12 @@ sam/
 
 Aligned with [Vision.md — Experience and interactivity](./Vision.md#experience-and-interactivity): `sam` should be **fun to use** and feel like a modern, responsive TUI.
 
-- [ ] **`ui/Shell.tsx`:** Ink UI that **greets** the user (short welcome + hint line for help)
-- [ ] **Slash-style routing:** e.g. user types **`/new`** (plus optional args) → run the same flow as `sam new` with parsed remainder; design for adding more routes later (`/index`, …)
-- [ ] **Startup index check:** on launch, call `obsidian eval` to get all markdown file paths + modification times in a single round-trip (see [Index staleness check](#index-staleness-check)); compare against the embedding manifest; if any files are new, modified, or deleted since the last index run, display a soft prompt: _"N notes changed since last index — run `sam index` to update"_ — proceed without blocking; log a warning before any search-based operation if the index is known-stale
-- [ ] **Responsiveness:** avoid blocking the React/Ink tree on long I/O where possible (spinner/async state); keep input feedback snappy—users expect **highly responsive** TUIs
-- [ ] **Subcommands unchanged:** `sam new`, `sam index`, … remain the scriptable/automation path; the shell is the discoverable default
-- [ ] Stub routes are acceptable until Phase 1 lands; wire **`/new`** to `commands/new.tsx` when P1-6 exists
+- [x] **`ui/Shell.tsx`:** Ink UI that **greets** the user (short welcome + hint line for help)
+- [x] **Slash-style routing:** e.g. user types **`/new`** (plus optional args) → run the same flow as `sam new` with parsed remainder; design for adding more routes later (`/index`, …)
+- [x] **Startup index check:** on launch, call `obsidian eval` to get all markdown file paths + modification times in a single round-trip (see [Index staleness check](#index-staleness-check)); compare against the embedding manifest; if any files are new, modified, or deleted since the last index run, display a soft prompt: _"N notes changed since last index — run `sam index` to update"_ — proceed without blocking; log a warning before any search-based operation if the index is known-stale
+- [x] **Responsiveness:** avoid blocking the React/Ink tree on long I/O where possible (spinner/async state); keep input feedback snappy—users expect **highly responsive** TUIs
+- [x] **Subcommands unchanged:** `sam new`, `sam index`, … remain the scriptable/automation path; the shell is the discoverable default
+- [x] Stub routes are acceptable until Phase 1 lands; wire **`/new`** to `commands/new.tsx` when P1-6 exists — **`/new` currently stubbed** (message only)
 
 ---
 
@@ -352,7 +354,7 @@ See [Vision.md — Experience and interactivity](./Vision.md#experience-and-inte
 
 | Phase | Done when |
 | ----- | --------- |
-| **P0** | `sam` opens Ink home shell with welcome + routing stub; `sam index` runs from a vault cwd; Obsidian commands succeed with resolved `vault=` when configured; chat and **embedding** settings resolve from flags/env/config; index writes use an **embedding-profile** path; `deno check` clean |
+| **P0** | `sam` opens Ink home shell with welcome + routing (`/new` stub); `sam index` runs via Obsidian CLI (no direct vault fs reads); chat and **embedding** settings resolve from flags/env/config; index writes use an **embedding-profile** directory under `~/.sam/index/`; `deno check` clean — **vector store is JSON + manifest**, not vectra (see Phase 0 status) |
 | **P1** | Raw input → structured draft → related notes → wikilink suggestions → user accept creates a note in the vault; **`/new`** (home shell) and **`sam new`** both work; dry-run matches Vision |
 | **P2** | Duplicate URL/file source detected before fetch, routes to canonicalize flow; new sources write `source:` front matter + `#source` tag; `obsidian rename`/`move` used for any renames (no broken links) |
 | **P3** | At least one queue type processes items through the Phase 1 pipeline and moves completed work out of the queue |
