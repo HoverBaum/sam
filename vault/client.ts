@@ -53,12 +53,50 @@ function readNumber(record: Record<string, unknown>, keys: string[]): number | u
   return undefined;
 }
 
-function parseJson(stdout: string, commandName: string): unknown {
+function tryParseJson(text: string): unknown | undefined {
   try {
-    return JSON.parse(stdout);
+    const parsed = JSON.parse(text);
+    if (typeof parsed === "string") {
+      const trimmed = parsed.trim();
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        return JSON.parse(trimmed);
+      }
+    }
+    return parsed;
   } catch {
-    throw new Error(`${commandName} expected JSON output but got non-JSON content.`);
+    return undefined;
   }
+}
+
+function parseJson(stdout: string, commandName: string): unknown {
+  const direct = tryParseJson(stdout);
+  if (direct !== undefined) {
+    return direct;
+  }
+
+  const lines = splitLines(stdout);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const parsed = tryParseJson(lines[i]);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+
+  const firstBrace = stdout.indexOf("{");
+  const firstBracket = stdout.indexOf("[");
+  const starts = [firstBrace, firstBracket].filter((index) => index >= 0);
+  const start = starts.length === 0 ? -1 : Math.min(...starts);
+  const lastBrace = stdout.lastIndexOf("}");
+  const lastBracket = stdout.lastIndexOf("]");
+  const end = Math.max(lastBrace, lastBracket);
+  if (start >= 0 && end > start) {
+    const parsed = tryParseJson(stdout.slice(start, end + 1));
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+
+  throw new Error(`${commandName} expected JSON output but got non-JSON content.`);
 }
 
 function toArrayPayload(payload: unknown): unknown[] {
@@ -76,22 +114,25 @@ function toArrayPayload(payload: unknown): unknown[] {
   return [];
 }
 
-function chunk<T>(items: T[], size: number): T[][] {
-  if (size <= 0) {
-    return [items];
-  }
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    out.push(items.slice(i, i + size));
-  }
-  return out;
-}
-
 function readFileStatMap(payload: unknown): Record<string, number> {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return {};
-  }
   const out: Record<string, number> = {};
+  if (Array.isArray(payload)) {
+    for (const row of payload) {
+      if (!row || typeof row !== "object") {
+        continue;
+      }
+      const rec = row as Record<string, unknown>;
+      const path = readString(rec, ["path", "file"]);
+      const mtime = readNumber(rec, ["mtime", "modified", "stat"]);
+      if (path && mtime !== undefined) {
+        out[path] = mtime;
+      }
+    }
+    return out;
+  }
+  if (!payload || typeof payload !== "object") {
+    return out;
+  }
   for (const [path, value] of Object.entries(payload)) {
     if (typeof value === "number" && Number.isFinite(value)) {
       out[path] = value;
@@ -151,8 +192,6 @@ async function runObsidian(
 export class VaultClient {
   constructor(private readonly config: RuntimeConfig) {}
 
-  private static readonly STAT_BATCH_SIZE = 200;
-
   async currentVaultName(): Promise<string> {
     const stdout = await runObsidian(this.config, ["vault", "info=name"]);
     const first = splitLines(stdout)[0];
@@ -201,19 +240,35 @@ export class VaultClient {
       return [];
     }
 
-    const out: FileStatEntry[] = [];
-    for (const batch of chunk(paths, VaultClient.STAT_BATCH_SIZE)) {
-      const code =
-        `JSON.stringify(Object.fromEntries(${JSON.stringify(batch)}.map((path) => [path, app.vault.getAbstractFileByPath(path)?.stat?.mtime ?? 0])))`;
-      const stdout = await runObsidian(this.config, ["eval", `code=${code}`]);
+    try {
+      const stdout = await this.eval(
+        'JSON.stringify(app.vault.getMarkdownFiles().map((f) => ({ path: f.path, mtime: f.stat.mtime ?? 0 })))',
+      );
       const payload = parseJson(stdout, "eval");
       const mtimes = readFileStatMap(payload);
-      for (const path of batch) {
+      return paths.map((path) => {
         const mtime = mtimes[path] ?? 0;
+        return { path, mtime: Number.isFinite(mtime) ? mtime : 0 };
+      });
+    } catch (error) {
+      if (!String((error as Error).message ?? error).includes("expected JSON output")) {
+        throw error;
+      }
+      const out: FileStatEntry[] = [];
+      for (const path of paths) {
+        const stdout = await this.eval(
+          `JSON.stringify(app.vault.getAbstractFileByPath(${JSON.stringify(path)})?.stat?.mtime ?? 0)`,
+        );
+        const payload = parseJson(stdout, "eval");
+        const mtime = typeof payload === "number"
+          ? payload
+          : typeof payload === "string" && !Number.isNaN(Number(payload))
+          ? Number(payload)
+          : 0;
         out.push({ path, mtime: Number.isFinite(mtime) ? mtime : 0 });
       }
+      return out;
     }
-    return out;
   }
 
   async backlinks(path: string): Promise<BacklinkEntry[]> {

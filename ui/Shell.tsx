@@ -113,6 +113,7 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
     phase: string;
     done: number;
     total: number;
+    phaseStartedAt: number;
   } | null>(null);
   const [staleHint, setStaleHint] = useState<string | null>(null);
   const [vaultDisplay, setVaultDisplay] = useState<string>(
@@ -362,7 +363,7 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
       }
       if (route === "/index") {
         setBusy(true);
-        setIndexProgress({ phase: "Starting", done: 0, total: 1 });
+        setIndexProgress({ phase: "Starting", done: 0, total: 1, phaseStartedAt: Date.now() });
         pushMessage("Starting index run...");
         try {
           const result = await executeIndex(
@@ -370,11 +371,12 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
             { flags: {}, positionals: [] },
             (patch) => {
               setIndexProgress((prev) => {
-                const base = prev ?? { phase: "Starting", done: 0, total: 1 };
+                const base = prev ?? { phase: "Starting", done: 0, total: 1, phaseStartedAt: Date.now() };
                 return {
                   phase: patch.phase ?? base.phase,
                   done: patch.done ?? base.done,
                   total: patch.total ?? base.total,
+                  phaseStartedAt: patch.phaseStartedAt ?? base.phaseStartedAt,
                 };
               });
             },
@@ -467,6 +469,7 @@ function ShellMain({ context, onOpenConnect }: ShellMainProps) {
               phase={indexProgress.phase}
               done={indexProgress.done}
               total={indexProgress.total}
+              phaseStartedAt={indexProgress.phaseStartedAt}
             />
           </Box>
         )

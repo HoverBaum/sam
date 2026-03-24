@@ -14,6 +14,10 @@ import {
 } from "../search/index.ts";
 import type { CommandContext } from "../types.ts";
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function testConfig(): RuntimeConfig {
   return {
     dryRun: false,
@@ -172,6 +176,45 @@ Deno.test("executeIndex uses one batched fileStats lookup for staleness", async 
 
     assertEquals(result.indexedCount, 3);
     assertEquals(calls, [["a.md", "b.md", "c.md"]]);
+  });
+});
+
+Deno.test("executeIndex limits concurrent embedding work to four notes", async () => {
+  await withTempHome(async () => {
+    const context = testContext();
+    let inFlight = 0;
+    let maxInFlight = 0;
+
+    const result = await executeIndex(
+      context,
+      { flags: {}, positionals: [] },
+      () => {},
+      {
+        createVaultClient: () => ({
+          files: async () => ["a.md", "b.md", "c.md", "d.md", "e.md", "f.md"],
+          fileStats: fileStats({
+            "a.md": 1,
+            "b.md": 2,
+            "c.md": 3,
+            "d.md": 4,
+            "e.md": 5,
+            "f.md": 6,
+          }),
+          read: async (path: string) => path,
+        }),
+        embedText: async () => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await delay(5);
+          inFlight -= 1;
+          return [1, 0];
+        },
+        now: () => 100,
+      },
+    );
+
+    assertEquals(result.indexedCount, 6);
+    assertEquals(maxInFlight, 4);
   });
 });
 

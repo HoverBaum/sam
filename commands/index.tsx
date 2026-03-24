@@ -4,6 +4,7 @@ import { IndexProgressLine } from "../ui/IndexProgressLine.tsx";
 import type { RuntimeConfig } from "../config.ts";
 import type { CommandArgs, CommandContext } from "../types.ts";
 import { booleanFlag } from "../utils/args.ts";
+import { mapLimit } from "../utils/concurrency.ts";
 import { embed } from "../search/embed.ts";
 import {
   assertProfileMatch,
@@ -20,9 +21,17 @@ import {
 } from "../search/index.ts";
 import { type FileStatEntry, VaultClient } from "../vault/client.ts";
 const DEFAULT_FAILURE_SAMPLE_LIMIT = 3;
+const INDEX_EMBED_CONCURRENCY = 4;
 
-function ProgressView(props: { total: number; done: number; phase: string }) {
-  return <IndexProgressLine phase={props.phase} done={props.done} total={props.total} />;
+function ProgressView(props: { total: number; done: number; phase: string; phaseStartedAt: number }) {
+  return (
+    <IndexProgressLine
+      phase={props.phase}
+      done={props.done}
+      total={props.total}
+      phaseStartedAt={props.phaseStartedAt}
+    />
+  );
 }
 
 interface IndexRunState {
@@ -30,6 +39,7 @@ interface IndexRunState {
   total: number;
   done: number;
   finished: boolean;
+  phaseStartedAt: number;
   error?: string;
 }
 
@@ -57,13 +67,41 @@ interface IndexVaultClient {
 interface ExecuteIndexOptions {
   continueOnEmbedError?: boolean;
   maxFailureSamples?: number;
+  embedConcurrency?: number;
   embedText?: (config: RuntimeConfig, text: string) => Promise<number[]>;
   createVaultClient?: (config: RuntimeConfig) => IndexVaultClient;
   now?: () => number;
 }
 
+interface IndexedTargetSuccess {
+  path: string;
+  contentHash: string;
+  vector?: number[];
+}
+
+interface IndexedTargetFailure {
+  path: string;
+  failure: IndexFailure;
+}
+
+type IndexedTargetResult = IndexedTargetSuccess | IndexedTargetFailure;
+
 function errorMessage(error: unknown): string {
   return String((error as Error).message ?? error);
+}
+
+function nowMs(now: () => number): number {
+  return Math.max(0, now());
+}
+
+function progressPatch(
+  now: () => number,
+  patch: Partial<IndexRunState>,
+): Partial<IndexRunState> {
+  if (patch.phase !== undefined) {
+    return { ...patch, phaseStartedAt: nowMs(now) };
+  }
+  return patch;
 }
 
 function formatEmbeddingFailure(config: RuntimeConfig, path: string, error: unknown): string {
@@ -107,6 +145,7 @@ export async function executeIndex(
   const skipEmbed = booleanFlag(args.flags, "skip-embed");
   const continueOnEmbedError = options.continueOnEmbedError ?? false;
   const maxFailureSamples = Math.max(options.maxFailureSamples ?? DEFAULT_FAILURE_SAMPLE_LIMIT, 0);
+  const embedConcurrency = Math.max(1, Math.floor(options.embedConcurrency ?? INDEX_EMBED_CONCURRENCY));
   const embedText = options.embedText ?? embed;
   const createVaultClient = options.createVaultClient ?? ((config: RuntimeConfig) => new VaultClient(config));
   const now = options.now ?? (() => Date.now());
@@ -139,11 +178,11 @@ export async function executeIndex(
   }
 
   const vault = createVaultClient(context.config);
-  onProgress({ phase: "Listing markdown files", done: 0, total: 1 });
+  onProgress(progressPatch(now, { phase: "Listing markdown files", done: 0, total: 1 }));
   const paths = (await vault.files("md")).filter((line) => line.endsWith(".md"));
 
   const pathTotal = Math.max(paths.length, 1);
-  onProgress({ phase: "Checking file timestamps", done: 0, total: pathTotal });
+  onProgress(progressPatch(now, { phase: "Checking file timestamps", done: 0, total: pathTotal }));
   const currentFiles = await vault.fileStats(paths);
   onProgress({ done: pathTotal, total: pathTotal });
 
@@ -159,45 +198,59 @@ export async function executeIndex(
   let failedCount = 0;
   let indexedCount = 0;
 
-  onProgress({ phase: "Indexing notes", done: 0, total: Math.max(targets.length, 1) });
+  const targetTotal = Math.max(targets.length, 1);
+  onProgress(progressPatch(now, { phase: "Indexing notes", done: 0, total: targetTotal }));
   let dimensions: number | undefined = existingManifest?.profile.dimensions;
-
-  for (let i = 0; i < targets.length; i += 1) {
-    const path = targets[i];
+  let completedTargets = 0;
+  const targetResults = await mapLimit(targets, embedConcurrency, async (path): Promise<IndexedTargetResult> => {
     const content = await vault.read(path);
     const contentHash = await hashContent(content);
 
     if (skipEmbed) {
-      manifestFiles[path] = { contentHash, indexedAt };
-      indexedCount += 1;
-      onProgress({ done: i + 1 });
-      continue;
+      completedTargets += 1;
+      onProgress({ done: completedTargets, total: targetTotal });
+      return { path, contentHash };
     }
 
     try {
       const vector = await embedText(context.config, content);
-      dimensions ??= vector.length;
-      manifestFiles[path] = { contentHash, indexedAt };
-      store.set(path, {
-        id: path,
-        vector,
-        metadata: { path, title: path.replace(/\.md$/, "") },
-      });
-      indexedCount += 1;
+      completedTargets += 1;
+      onProgress({ done: completedTargets, total: targetTotal });
+      return { path, contentHash, vector };
     } catch (error) {
       if (!continueOnEmbedError) {
         throw error;
       }
-      failedCount += 1;
-      if (failureSamples.length < maxFailureSamples) {
-        failureSamples.push({
+      completedTargets += 1;
+      onProgress({ done: completedTargets, total: targetTotal });
+      return {
+        path,
+        failure: {
           path,
           message: formatEmbeddingFailure(context.config, path, error),
-        });
-      }
+        },
+      };
     }
+  });
 
-    onProgress({ done: i + 1 });
+  for (const result of targetResults) {
+    if ("failure" in result) {
+      failedCount += 1;
+      if (failureSamples.length < maxFailureSamples) {
+        failureSamples.push(result.failure);
+      }
+      continue;
+    }
+    if (result.vector) {
+      dimensions ??= result.vector.length;
+      store.set(result.path, {
+        id: result.path,
+        vector: result.vector,
+        metadata: { path: result.path, title: result.path.replace(/\.md$/, "") },
+      });
+    }
+    manifestFiles[result.path] = { contentHash: result.contentHash, indexedAt };
+    indexedCount += 1;
   }
 
   for (const deletedPath of staleness.deletedPaths) {
@@ -227,9 +280,10 @@ export async function executeIndex(
   }
 
   onProgress({
+    phaseStartedAt: nowMs(now),
     phase: failedCount > 0 ? "Completed with warnings" : "Completed",
-    done: Math.max(targets.length, 1),
-    total: Math.max(targets.length, 1),
+    done: targetTotal,
+    total: targetTotal,
   });
   return {
     totalFiles: paths.length,
@@ -248,6 +302,7 @@ export async function runIndexCommand(context: CommandContext, args: CommandArgs
     done: 0,
     total: 1,
     finished: false,
+    phaseStartedAt: Date.now(),
   };
 
   const app = render(<ProgressRunner context={context} args={args} initial={initial} />);
@@ -283,5 +338,12 @@ function ProgressRunner(
   if (state.finished) {
     return <Text color="green">index complete</Text>;
   }
-  return <ProgressView total={state.total} done={state.done} phase={state.phase} />;
+  return (
+    <ProgressView
+      total={state.total}
+      done={state.done}
+      phase={state.phase}
+      phaseStartedAt={state.phaseStartedAt}
+    />
+  );
 }
