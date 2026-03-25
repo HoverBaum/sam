@@ -1,11 +1,11 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import { basename } from "@std/path";
 import type { CommandContext } from "../types.ts";
 import {
-  nearestNeighbors,
-  type NeighborHit,
+  connectNeighbors,
+  type ConnectNeighborHit,
   readManifest,
   readStore,
   resolveActiveProfileDir,
@@ -17,6 +17,7 @@ import {
 } from "../search/noteAutocomplete.ts";
 import { ShellFrame } from "./ShellFrame.tsx";
 import { useTerminalRows } from "./useTerminalRows.ts";
+import { VaultClient } from "../vault/client.ts";
 
 const TOP_K = 5;
 const SUGGEST_CAP = 10;
@@ -38,10 +39,14 @@ export function ConnectFlow(
   const [noteInput, setNoteInput] = useState("");
   const [indexedPaths, setIndexedPaths] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [results, setResults] = useState<NeighborHit[]>([]);
+  const [results, setResults] = useState<ConnectNeighborHit[]>([]);
   const [runError, setRunError] = useState<string | null>(null);
   const [autocompleteIndex, setAutocompleteIndex] = useState(0);
   const [listIndex, setListIndex] = useState(0);
+  const [sourcePathLabel, setSourcePathLabel] = useState("");
+  const graphCacheRef = useRef<
+    Map<string, Promise<{ links: Set<string>; backlinks: Set<string> }>>
+  >(new Map());
 
   useEffect(() => {
     let cancelled = false;
@@ -94,8 +99,18 @@ export function ConnectFlow(
       return;
     }
     setPhase("loading");
+    setSourcePathLabel(resolved);
     try {
-      const hits = await nearestNeighbors(context.config, resolved, TOP_K);
+      const vault = new VaultClient(context.config);
+      const sourceLinks = await vault.links(resolved).then((rows) => rows.map((row) => row.path)).catch(() => []);
+      const hits = await connectNeighbors(context.config, resolved, {
+        topK: TOP_K,
+        candidatePool: 60,
+        sourceLinkedPaths: sourceLinks,
+        graphClient: vault,
+        graphCache: graphCacheRef.current,
+        excludeSourceLinkedPaths: true,
+      });
       setResults(hits);
       setPhase("results");
     } catch (e) {
@@ -113,6 +128,7 @@ export function ConnectFlow(
       if (phase === "results") {
         setPhase("pick");
         setResults([]);
+        setSourcePathLabel("");
         setRunError(null);
         return;
       }
@@ -256,7 +272,7 @@ export function ConnectFlow(
     return (
       <ShellFrame
         variant="sub"
-        subTitle="Similar notes and sections (cosine similarity)"
+        subTitle="Similar notes (multi-factor ranking)"
         terminalRows={terminalRows}
         footerVault={vaultDisplay}
         footerContext={footerContext}
@@ -266,23 +282,17 @@ export function ConnectFlow(
         promptValue=""
       >
         <Text dimColor>Esc back to picker · Ctrl+C quit</Text>
+        {sourcePathLabel ? <Text dimColor>Results for: {sourcePathLabel}</Text> : null}
         {results.length === 0
           ? <Text dimColor>No other indexed notes to compare.</Text>
           : results.map((hit, i) => (
             <Text key={hit.id}>
               {`${i + 1}  ${
-                String(Math.round(hit.score * 100)).padStart(3, " ")
+                String(Math.round(hit.finalScore * 100)).padStart(3, " ")
               }%  ${hit.title}  `}
               <Text dimColor>
-                {hit.kind === "section" && hit.sectionPath
-                  ? `${hit.path} · ${hit.sectionPath}${
-                    hit.sourceSectionPath
-                      ? ` · via ${hit.sourceSectionPath}`
-                      : ""
-                  }`
-                  : hit.sourceSectionPath
-                  ? `${hit.id} · via ${hit.sourceSectionPath}`
-                  : hit.id}
+                {hit.path}
+                {hit.reasons.length > 0 ? ` · ${hit.reasons.map((reason) => reason.label).join(" · ")}` : ""}
               </Text>
             </Text>
           ))}

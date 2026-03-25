@@ -238,6 +238,71 @@ export interface NeighborHit {
   sourceSectionPath?: string;
 }
 
+export interface ConnectRankReason {
+  label: string;
+  detail?: string;
+}
+
+export interface ConnectNeighborHit extends NeighborHit {
+  /** Final blended score used for ordering. */
+  finalScore: number;
+  /** Pure cosine to source note/sections before reranking boosts. */
+  baseScore: number;
+  /** Max cosine to source-linked notes/sections when available. */
+  linkedScore: number;
+  /** Number of strong section matches found for this note. */
+  strongSectionCount: number;
+  reasons: ConnectRankReason[];
+}
+
+export interface ConnectRankingWeights {
+  baseCosine: number;
+  linkedSimilarity: number;
+  multiSectionEvidence: number;
+  mixedEvidence: number;
+  directLinkAffinity: number;
+  sharedLinkNeighborhood: number;
+}
+
+export interface ConnectGraphClient {
+  links(path: string): Promise<Array<{ path: string }>>;
+  backlinks(path: string): Promise<Array<{ sourcePath: string }>>;
+}
+
+export interface ConnectGraphContext {
+  linksToSource: boolean;
+  sharedSourceLinks: number;
+}
+
+export interface ConnectRankingOptions {
+  topK?: number;
+  candidatePool?: number;
+  strongSectionThreshold?: number;
+  sourceLinkedPaths?: Iterable<string>;
+  excludeSourceLinkedPaths?: boolean;
+  weights?: Partial<ConnectRankingWeights>;
+  candidateGraphContext?: ReadonlyMap<string, ConnectGraphContext>;
+}
+
+export interface ConnectNeighborsOptions extends ConnectRankingOptions {
+  graphClient?: ConnectGraphClient;
+  graphCache?: Map<string, Promise<{ links: Set<string>; backlinks: Set<string> }>>;
+  candidateContextLimit?: number;
+}
+
+const DEFAULT_CONNECT_WEIGHTS: ConnectRankingWeights = {
+  baseCosine: 0.7,
+  linkedSimilarity: 0.15,
+  multiSectionEvidence: 0.08,
+  mixedEvidence: 0.03,
+  directLinkAffinity: 0.02,
+  sharedLinkNeighborhood: 0.02,
+};
+
+const DEFAULT_CANDIDATE_POOL = 50;
+const DEFAULT_CANDIDATE_CONTEXT_LIMIT = 40;
+const DEFAULT_STRONG_SECTION_THRESHOLD = 0.72;
+
 function toNeighborHit(item: IndexItem, score: number): NeighborHit {
   return {
     id: item.id,
@@ -250,39 +315,245 @@ function toNeighborHit(item: IndexItem, score: number): NeighborHit {
   };
 }
 
+function normalizeLinkPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) return "";
+  const withoutBrackets = trimmed.startsWith("[[") && trimmed.endsWith("]]")
+    ? trimmed.slice(2, -2)
+    : trimmed;
+  const hash = withoutBrackets.indexOf("#");
+  return (hash >= 0 ? withoutBrackets.slice(0, hash) : withoutBrackets).trim();
+}
+
+function resolveLinkedPaths(sourceLinkedPaths: Iterable<string> | undefined, store: Map<string, IndexItem>): Set<string> {
+  const out = new Set<string>();
+  if (!sourceLinkedPaths) {
+    return out;
+  }
+  const indexedNotePaths = new Set<string>();
+  const byBaseName = new Map<string, string[]>();
+  for (const item of store.values()) {
+    if (!isNoteItem(item)) continue;
+    indexedNotePaths.add(item.metadata.path);
+    const base = basename(item.metadata.path);
+    const existing = byBaseName.get(base);
+    if (existing) {
+      existing.push(item.metadata.path);
+    } else {
+      byBaseName.set(base, [item.metadata.path]);
+    }
+  }
+  for (const raw of sourceLinkedPaths) {
+    const normalized = normalizeLinkPath(raw);
+    if (!normalized) continue;
+    if (indexedNotePaths.has(normalized)) {
+      out.add(normalized);
+      continue;
+    }
+    const baseMatches = byBaseName.get(basename(normalized));
+    if (baseMatches && baseMatches.length === 1) {
+      out.add(baseMatches[0]);
+    }
+  }
+  return out;
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function formatPct(score: number): string {
+  return `${Math.round(clamp01(score) * 100)}%`;
+}
+
+interface NoteScoreAccumulator {
+  path: string;
+  noteTitle?: string;
+  summary?: string;
+  bestBaseScore: number;
+  bestLinkedScore: number;
+  bestKind: IndexItemKind;
+  bestSectionPath?: string;
+  bestSourceSectionPath?: string;
+  hasNoteEvidence: boolean;
+  hasSectionEvidence: boolean;
+  strongSections: Set<string>;
+}
+
+function scorePath(
+  path: string,
+  acc: NoteScoreAccumulator,
+  linkedSet: Set<string>,
+  options: ConnectRankingOptions,
+): ConnectNeighborHit {
+  const weights: ConnectRankingWeights = { ...DEFAULT_CONNECT_WEIGHTS, ...(options.weights ?? {}) };
+  const graph = options.candidateGraphContext?.get(path);
+  const strongSectionFactor = Math.min(3, acc.strongSections.size) / 3;
+  const mixedEvidenceFactor = acc.hasNoteEvidence && acc.hasSectionEvidence ? 1 : 0;
+  const directLinkFactor = graph?.linksToSource ? 1 : 0;
+  const sharedNeighborhoodFactor = Math.min(3, graph?.sharedSourceLinks ?? 0) / 3;
+  const finalScore = clamp01(
+    (weights.baseCosine * clamp01(acc.bestBaseScore)) +
+      (weights.linkedSimilarity * clamp01(acc.bestLinkedScore)) +
+      (weights.multiSectionEvidence * strongSectionFactor) +
+      (weights.mixedEvidence * mixedEvidenceFactor) +
+      (weights.directLinkAffinity * directLinkFactor) +
+      (weights.sharedLinkNeighborhood * sharedNeighborhoodFactor),
+  );
+  const reasons: ConnectRankReason[] = [{ label: `cos ${formatPct(acc.bestBaseScore)}` }];
+  if (acc.bestLinkedScore > 0) {
+    reasons.push({ label: `linked-context ${formatPct(acc.bestLinkedScore)}` });
+  }
+  if (acc.strongSections.size > 1) {
+    reasons.push({ label: `${acc.strongSections.size} strong sections` });
+  }
+  if (acc.hasNoteEvidence && acc.hasSectionEvidence) {
+    reasons.push({ label: "note + section evidence" });
+  }
+  if (directLinkFactor > 0) {
+    reasons.push({ label: "directly linked" });
+  }
+  if ((graph?.sharedSourceLinks ?? 0) > 0) {
+    reasons.push({ label: `shares ${graph?.sharedSourceLinks} source links` });
+  }
+  if (linkedSet.size > 0 && !linkedSet.has(path)) {
+    reasons.push({ label: "not already linked" });
+  }
+  return {
+    id: path,
+    title: acc.noteTitle ?? buildNoteTitle(path),
+    summary: acc.summary ?? "",
+    score: finalScore,
+    finalScore,
+    baseScore: clamp01(acc.bestBaseScore),
+    linkedScore: clamp01(acc.bestLinkedScore),
+    strongSectionCount: acc.strongSections.size,
+    reasons,
+    kind: "note",
+    path,
+    sectionPath: acc.bestSectionPath,
+    sourceKind: acc.bestKind,
+    sourceSectionPath: acc.bestSourceSectionPath,
+  };
+}
+
+/** Ranking for connect: retrieve a wider pool by cosine, then rerank at note level. */
+export function rankConnectCandidates(
+  store: Map<string, IndexItem>,
+  sourcePath: string,
+  options: ConnectRankingOptions = {},
+): ConnectNeighborHit[] {
+  const topK = Math.max(0, options.topK ?? 5);
+  const candidatePool = Math.max(topK, options.candidatePool ?? DEFAULT_CANDIDATE_POOL);
+  const strongSectionThreshold = options.strongSectionThreshold ?? DEFAULT_STRONG_SECTION_THRESHOLD;
+  const sourceItems = [...store.values()].filter((item) => item.metadata.path === sourcePath);
+  if (sourceItems.length === 0) {
+    throw new Error(`Note not in index: ${sourcePath}. Run \`sam index\` to index this note.`);
+  }
+  const linkedSet = resolveLinkedPaths(options.sourceLinkedPaths, store);
+  const linkedSourceItems = [...store.values()].filter((item) => linkedSet.has(item.metadata.path));
+  const byPath = new Map<string, NoteScoreAccumulator>();
+  for (const item of store.values()) {
+    const path = item.metadata.path;
+    if (path === sourcePath) {
+      continue;
+    }
+    if (options.excludeSourceLinkedPaths !== false && linkedSet.has(path)) {
+      continue;
+    }
+    const kind = indexItemKind(item);
+    const existing = byPath.get(path) ?? {
+      path,
+      bestBaseScore: 0,
+      bestLinkedScore: 0,
+      bestKind: kind,
+      hasNoteEvidence: false,
+      hasSectionEvidence: false,
+      strongSections: new Set<string>(),
+    };
+    if (isNoteItem(item)) {
+      existing.noteTitle = item.metadata.title ?? buildNoteTitle(path);
+      existing.summary = item.metadata.summary ?? existing.summary;
+    }
+    let base = 0;
+    let bestSource: IndexItem | null = null;
+    for (const sourceItem of sourceItems) {
+      const score = cosine(item.vector, sourceItem.vector);
+      if (score > base) {
+        base = score;
+        bestSource = sourceItem;
+      }
+    }
+    if (base > existing.bestBaseScore) {
+      existing.bestBaseScore = base;
+      existing.bestKind = kind;
+      existing.bestSectionPath = item.metadata.sectionPath;
+      existing.bestSourceSectionPath = bestSource?.metadata.sectionPath;
+    }
+    if (kind === "note") {
+      existing.hasNoteEvidence = true;
+    } else if (base > 0) {
+      existing.hasSectionEvidence = true;
+    }
+    if (kind === "section" && base >= strongSectionThreshold) {
+      existing.strongSections.add(item.metadata.sectionPath ?? item.id);
+    }
+    let linkedScore = 0;
+    for (const linkedSourceItem of linkedSourceItems) {
+      linkedScore = Math.max(linkedScore, cosine(item.vector, linkedSourceItem.vector));
+    }
+    existing.bestLinkedScore = Math.max(existing.bestLinkedScore, linkedScore);
+    byPath.set(path, existing);
+  }
+  const rankedByBase = [...byPath.values()]
+    .sort((a, b) => b.bestBaseScore - a.bestBaseScore || a.path.localeCompare(b.path));
+  const poolPaths = new Set(rankedByBase.slice(0, candidatePool).map((entry) => entry.path));
+  const rankedByLinked = [...byPath.values()]
+    .sort((a, b) => b.bestLinkedScore - a.bestLinkedScore || a.path.localeCompare(b.path));
+  for (const entry of rankedByLinked.slice(0, candidatePool)) {
+    if (entry.bestLinkedScore > 0) {
+      poolPaths.add(entry.path);
+    }
+  }
+  return [...poolPaths]
+    .map((path) => scorePath(path, byPath.get(path)!, linkedSet, options))
+    .sort((a, b) => {
+      if (b.finalScore !== a.finalScore) return b.finalScore - a.finalScore;
+      if (b.baseScore !== a.baseScore) return b.baseScore - a.baseScore;
+      return a.path.localeCompare(b.path);
+    })
+    .slice(0, topK);
+}
+
 /** Pure ranking: cosine similarity to `sourcePath`'s vector, excluding the source note. */
 export function rankNearestNeighbors(
   store: Map<string, IndexItem>,
   sourcePath: string,
   k: number,
 ): NeighborHit[] {
-  const sourceItems = [...store.values()].filter((item) => item.metadata.path === sourcePath);
-  if (sourceItems.length === 0) {
-    throw new Error(`Note not in index: ${sourcePath}. Run \`sam index\` to index this note.`);
-  }
-
-  const bestHits = new Map<string, NeighborHit>();
-  for (const sourceItem of sourceItems) {
-    for (const item of store.values()) {
-      if (item.metadata.path === sourcePath) {
-        continue;
-      }
-      const score = cosine(item.vector, sourceItem.vector);
-      const existing = bestHits.get(item.id);
-      if (existing && existing.score >= score) {
-        continue;
-      }
-      bestHits.set(item.id, {
-        ...toNeighborHit(item, score),
-        sourceKind: indexItemKind(sourceItem),
-        sourceSectionPath: sourceItem.metadata.sectionPath,
-      });
-    }
-  }
-
-  return [...bestHits.values()]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, Math.max(0, k));
+  return rankConnectCandidates(store, sourcePath, {
+    topK: k,
+    candidatePool: Math.max(k, DEFAULT_CANDIDATE_POOL),
+    excludeSourceLinkedPaths: false,
+    weights: {
+      baseCosine: 1,
+      linkedSimilarity: 0,
+      multiSectionEvidence: 0,
+      mixedEvidence: 0,
+      directLinkAffinity: 0,
+      sharedLinkNeighborhood: 0,
+    },
+  }).map((hit) => ({
+    id: hit.id,
+    title: hit.title,
+    summary: hit.summary,
+    score: hit.score,
+    kind: hit.kind,
+    path: hit.path,
+    sectionPath: hit.sectionPath,
+    sourceKind: hit.sourceKind,
+    sourceSectionPath: hit.sourceSectionPath,
+  }));
 }
 
 export async function nearestNeighbors(
@@ -302,6 +573,92 @@ export async function nearestNeighbors(
   }
   assertProfileMatch(config, manifest, source.vector.length);
   return rankNearestNeighbors(store, sourcePath, k);
+}
+
+async function readGraphSets(
+  path: string,
+  client: ConnectGraphClient,
+  cache: Map<string, Promise<{ links: Set<string>; backlinks: Set<string> }>>,
+): Promise<{ links: Set<string>; backlinks: Set<string> }> {
+  const existing = cache.get(path);
+  if (existing) {
+    return await existing;
+  }
+  const pending = (async () => {
+    const [links, backlinks] = await Promise.all([
+      client.links(path).catch(() => [] as Array<{ path: string }>),
+      client.backlinks(path).catch(() => [] as Array<{ sourcePath: string }>),
+    ]);
+    return {
+      links: new Set(links.map((entry) => normalizeLinkPath(entry.path)).filter((value) => value.length > 0)),
+      backlinks: new Set(
+        backlinks.map((entry) => normalizeLinkPath(entry.sourcePath)).filter((value) => value.length > 0),
+      ),
+    };
+  })();
+  cache.set(path, pending);
+  return await pending;
+}
+
+export async function connectNeighbors(
+  config: RuntimeConfig,
+  sourcePath: string,
+  options: ConnectNeighborsOptions = {},
+): Promise<ConnectNeighborHit[]> {
+  const dir = await resolveActiveProfileDir(config);
+  const manifest = await readManifest(dir);
+  if (!manifest) {
+    throw new Error("No index profile found. Run `sam index` to build the index.");
+  }
+  const store = await readStore(dir);
+  const source = store.get(sourcePath);
+  if (!source) {
+    throw new Error(`Note not in index: ${sourcePath}. Run \`sam index\` to index this note.`);
+  }
+  assertProfileMatch(config, manifest, source.vector.length);
+
+  const topK = Math.max(0, options.topK ?? 5);
+  const candidatePool = Math.max(topK, options.candidatePool ?? DEFAULT_CANDIDATE_POOL);
+  const sourceLinks = resolveLinkedPaths(options.sourceLinkedPaths, store);
+  const graphContext = new Map<string, ConnectGraphContext>();
+  if (options.graphClient) {
+    const cache = options.graphCache ?? new Map<string, Promise<{ links: Set<string>; backlinks: Set<string> }>>();
+    const sourceSets = await readGraphSets(sourcePath, options.graphClient, cache);
+    const sourceLinkSet = new Set<string>([...sourceLinks, ...sourceSets.links]);
+    const preRanked = rankConnectCandidates(store, sourcePath, {
+      ...options,
+      topK: candidatePool,
+      candidatePool,
+      sourceLinkedPaths: sourceLinkSet,
+      candidateGraphContext: undefined,
+    });
+    const contextPaths = preRanked
+      .slice(0, Math.max(0, options.candidateContextLimit ?? DEFAULT_CANDIDATE_CONTEXT_LIMIT))
+      .map((hit) => hit.path);
+    for (const path of contextPaths) {
+      const candidateSets = await readGraphSets(path, options.graphClient, cache);
+      const sharedSourceLinks = [...candidateSets.links].filter((linkPath) => sourceLinkSet.has(linkPath)).length;
+      const linksToSource = candidateSets.links.has(sourcePath) || candidateSets.backlinks.has(sourcePath);
+      graphContext.set(path, {
+        linksToSource,
+        sharedSourceLinks,
+      });
+    }
+    return rankConnectCandidates(store, sourcePath, {
+      ...options,
+      topK,
+      candidatePool,
+      sourceLinkedPaths: sourceLinkSet,
+      candidateGraphContext: graphContext,
+    });
+  }
+
+  return rankConnectCandidates(store, sourcePath, {
+    ...options,
+    topK,
+    candidatePool,
+    sourceLinkedPaths: sourceLinks,
+  });
 }
 
 export async function query(
