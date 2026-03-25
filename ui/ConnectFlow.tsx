@@ -5,10 +5,10 @@ import { basename } from "@std/path";
 import type { CommandContext } from "../types.ts";
 import {
   nearestNeighbors,
+  type NeighborHit,
   readManifest,
   readStore,
   resolveActiveProfileDir,
-  type NeighborHit,
 } from "../search/index.ts";
 import {
   filterNotePaths,
@@ -29,7 +29,9 @@ export interface ConnectFlowProps {
 
 type Phase = "pick" | "loading" | "results" | "error" | "empty";
 
-export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps) {
+export function ConnectFlow(
+  { context, vaultDisplay, onExit }: ConnectFlowProps,
+) {
   const { exit } = useApp();
   const terminalRows = useTerminalRows();
   const [phase, setPhase] = useState<Phase>("pick");
@@ -86,7 +88,9 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
     const store = await readStore(dir);
     const resolved = resolvePickedNotePath(pickedPath, indexedPaths, store);
     if (!resolved) {
-      setRunError("Pick a note from the list (↑↓) or type a full vault path, then Enter.");
+      setRunError(
+        "Pick a note from the list (↑↓) or type a full vault path, then Enter.",
+      );
       return;
     }
     setPhase("loading");
@@ -132,7 +136,9 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
     }
 
     if (key.return) {
-      const chosen = suggestions.length > 0 ? suggestions[listIndex] : noteInput.trim();
+      const chosen = suggestions.length > 0
+        ? suggestions[listIndex]
+        : noteInput.trim();
       void runSearch(chosen);
       return;
     }
@@ -176,6 +182,13 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
     return "Connect · similar notes and sections";
   }, [phase]);
 
+  const footerActions = useMemo(() => {
+    if (phase === "results") return "Esc picker · Ctrl+C quit";
+    if (phase === "loading") return "Wait for results · Ctrl+C quit";
+    if (phase === "empty" || phase === "error") return "Enter or Esc back";
+    return "Type to filter · ↑↓ or j/k · Enter search · Tab cycle · Esc shell";
+  }, [phase]);
+
   if (phase === "empty") {
     return (
       <ShellFrame
@@ -184,11 +197,14 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
         terminalRows={terminalRows}
         footerVault={vaultDisplay}
         footerContext={footerContext}
+        footerRoute="/connect"
+        footerActions={footerActions}
         prompt=""
         promptValue=""
       >
         <Text dimColor>
-          No indexed notes yet. Run sam index first, then try again. Enter or Esc to go back.
+          No indexed notes yet. Run sam index first, then try again. Enter or
+          Esc to go back.
         </Text>
       </ShellFrame>
     );
@@ -202,6 +218,8 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
         terminalRows={terminalRows}
         footerVault={vaultDisplay}
         footerContext={footerContext}
+        footerRoute="/connect"
+        footerActions={footerActions}
         prompt=""
         promptValue=""
       >
@@ -219,6 +237,8 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
         terminalRows={terminalRows}
         footerVault={vaultDisplay}
         footerContext={footerContext}
+        footerRoute="/connect"
+        footerActions={footerActions}
         prompt=""
         promptValue=""
       >
@@ -226,7 +246,7 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
           <Text color="green">
             <Spinner type="dots" />
           </Text>
-          <Text> Finding kindred notes…</Text>
+          <Text>Finding kindred notes…</Text>
         </Box>
       </ShellFrame>
     );
@@ -240,6 +260,8 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
         terminalRows={terminalRows}
         footerVault={vaultDisplay}
         footerContext={footerContext}
+        footerRoute="/connect"
+        footerActions={footerActions}
         prompt=""
         promptValue=""
       >
@@ -247,17 +269,23 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
         {results.length === 0
           ? <Text dimColor>No other indexed notes to compare.</Text>
           : results.map((hit, i) => (
-              <Text key={hit.id}>
-                {`${i + 1}  ${String(Math.round(hit.score * 100)).padStart(3, " ")}%  ${hit.title}  `}
-                <Text dimColor>
-                  {hit.kind === "section" && hit.sectionPath
-                    ? `${hit.path} · ${hit.sectionPath}${hit.sourceSectionPath ? ` · via ${hit.sourceSectionPath}` : ""}`
-                    : hit.sourceSectionPath
-                    ? `${hit.id} · via ${hit.sourceSectionPath}`
-                    : hit.id}
-                </Text>
+            <Text key={hit.id}>
+              {`${i + 1}  ${
+                String(Math.round(hit.score * 100)).padStart(3, " ")
+              }%  ${hit.title}  `}
+              <Text dimColor>
+                {hit.kind === "section" && hit.sectionPath
+                  ? `${hit.path} · ${hit.sectionPath}${
+                    hit.sourceSectionPath
+                      ? ` · via ${hit.sourceSectionPath}`
+                      : ""
+                  }`
+                  : hit.sourceSectionPath
+                  ? `${hit.id} · via ${hit.sourceSectionPath}`
+                  : hit.id}
               </Text>
-            ))}
+            </Text>
+          ))}
       </ShellFrame>
     );
   }
@@ -269,10 +297,14 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
       terminalRows={terminalRows}
       footerVault={vaultDisplay}
       footerContext={footerContext}
+      footerRoute="/connect"
+      footerActions={footerActions}
       prompt="filter> "
       promptValue={noteInput}
     >
-      <Text dimColor>Type to filter · ↑↓ or j/k · Enter search · Tab cycle · Esc shell</Text>
+      <Text dimColor>
+        Type to filter · ↑↓ or j/k · Enter search · Tab cycle · Esc shell
+      </Text>
       {runError ? <Text color="yellow">{runError}</Text> : null}
       {suggestions.length > 0
         ? (

@@ -1,15 +1,41 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
 import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 import SelectInput from "ink-select-input";
+import {
+  matchPath,
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router";
 import { IndexProgressLine } from "./IndexProgressLine.tsx";
 import { ConnectFlow } from "./ConnectFlow.tsx";
 import { ShellFrame } from "./ShellFrame.tsx";
 import { useTerminalRows } from "./useTerminalRows.ts";
 import { useVaultDisplay } from "./useVaultDisplay.ts";
+import {
+  FIELD_LABELS,
+  FIELD_ORDER,
+  normalizeSettingsField,
+  parseShellCommand,
+  type SettingsField,
+  settingsFieldPath,
+} from "./shellRouting.ts";
 import type { CommandContext } from "../types.ts";
 import { executeIndex, indexShellMessages } from "../commands/index.tsx";
-import { loadConfigFile, saveConfigFile, type SamConfigFile } from "../config.ts";
+import {
+  loadConfigFile,
+  type SamConfigFile,
+  saveConfigFile,
+} from "../config.ts";
 import {
   classifyStaleness,
   readManifest,
@@ -21,8 +47,7 @@ interface ShellProps {
   context: CommandContext;
 }
 
-interface ShellMainProps extends ShellProps {
-  onOpenConnect: () => void;
+interface ShellWorkspaceProps extends ShellProps {
   vaultDisplay: string;
 }
 
@@ -30,14 +55,6 @@ interface ShellMessage {
   id: number;
   text: string;
 }
-
-type Route = "/new" | "/index" | "/connect" | "/config" | "help" | "";
-type SettingsField =
-  | "vault"
-  | "model"
-  | "embeddingProvider"
-  | "embeddingModel"
-  | "embeddingBaseUrl";
 
 interface SettingsDraft {
   vault: string;
@@ -47,24 +64,8 @@ interface SettingsDraft {
   embeddingBaseUrl: string;
 }
 
-type UiMode = "shell" | "settings-menu" | "settings-edit";
-
 const OBSIDIAN_CONNECTION_ERROR = "Unable to connect to Obsidian main process";
 const OBSIDIAN_MISSING_ERROR = "Obsidian CLI not found";
-const FIELD_ORDER: SettingsField[] = [
-  "vault",
-  "model",
-  "embeddingProvider",
-  "embeddingModel",
-  "embeddingBaseUrl",
-];
-const FIELD_LABELS: Record<SettingsField, string> = {
-  vault: "Vault",
-  model: "AI Model",
-  embeddingProvider: "Embedding Provider",
-  embeddingModel: "Embedding Model",
-  embeddingBaseUrl: "Embedding Base URL",
-};
 const POPULAR_MODELS = [
   "anthropic/claude-3-5-sonnet-20241022",
   "openai/gpt-4o-mini",
@@ -73,28 +74,30 @@ const POPULAR_MODELS = [
   "groq/llama-3.3-70b-versatile",
 ];
 const EMBED_PROVIDER_SUGGESTIONS = ["ollama", "openai-compatible", "openai"];
-const EMBED_MODEL_SUGGESTIONS = ["nomic-embed-text", "text-embedding-3-small", "text-embedding-3-large"];
-const EMBED_BASE_URL_SUGGESTIONS = ["http://127.0.0.1:11434", "https://api.openai.com/v1"];
+const EMBED_MODEL_SUGGESTIONS = [
+  "nomic-embed-text",
+  "text-embedding-3-small",
+  "text-embedding-3-large",
+];
+const EMBED_BASE_URL_SUGGESTIONS = [
+  "http://127.0.0.1:11434",
+  "https://api.openai.com/v1",
+];
 
 const TRANSCRIPT_CAP = 150;
 
-function parseRoute(input: string): Route {
-  const trimmed = input.trim();
-  if (trimmed.startsWith("/new")) return "/new";
-  if (trimmed.startsWith("/index")) return "/index";
-  if (trimmed.startsWith("/connect")) return "/connect";
-  if (trimmed.startsWith("/config") || trimmed.startsWith("/settings")) return "/config";
-  if (trimmed === "/help" || trimmed === "help") return "help";
-  return "";
-}
-
-function draftFromConfig(file: SamConfigFile, context: CommandContext): SettingsDraft {
+function draftFromConfig(
+  file: SamConfigFile,
+  context: CommandContext,
+): SettingsDraft {
   return {
     vault: file.vault ?? context.config.vault ?? "",
     model: file.model ?? context.config.model ?? "",
-    embeddingProvider: file.embeddingProvider ?? context.config.embeddingProvider ?? "",
+    embeddingProvider: file.embeddingProvider ??
+      context.config.embeddingProvider ?? "",
     embeddingModel: file.embeddingModel ?? context.config.embeddingModel ?? "",
-    embeddingBaseUrl: file.embeddingBaseUrl ?? context.config.embeddingBaseUrl ?? "",
+    embeddingBaseUrl: file.embeddingBaseUrl ??
+      context.config.embeddingBaseUrl ?? "",
   };
 }
 
@@ -110,10 +113,66 @@ function trimSuggestions(values: string[]): string[] {
   return out;
 }
 
-function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
+function ShellHomePanel() {
+  return (
+    <Box flexShrink={0}>
+      <Text dimColor>
+        Type /help for routes. Try /connect, /config, /index, or /home.
+      </Text>
+    </Box>
+  );
+}
+
+function SettingsMenuPanel(
+  { settingsItems, onSelect }: {
+    settingsItems: Array<{ label: string; value: SettingsField }>;
+    onSelect: (field: SettingsField) => void;
+  },
+) {
+  return (
+    <Box marginTop={1} flexDirection="column" flexShrink={0}>
+      <Text color="magenta">⚙️ Settings</Text>
+      <Text dimColor>
+        Enter edit · S save · Esc shell · current path shows where you are
+      </Text>
+      <SelectInput
+        items={settingsItems}
+        onSelect={(item) => onSelect(item.value)}
+        limit={6}
+      />
+    </Box>
+  );
+}
+
+function SettingsEditPanel(
+  { editingField, editBuffer, autoSuggestions }: {
+    editingField: SettingsField;
+    editBuffer: string;
+    autoSuggestions: string[];
+  },
+) {
+  return (
+    <Box marginTop={1} flexDirection="column" flexShrink={0}>
+      <Text color="green">Editing {FIELD_LABELS[editingField]}</Text>
+      <Text dimColor>Tab autocomplete · Enter apply · Esc settings</Text>
+      <Text>{editBuffer}</Text>
+      {autoSuggestions.length > 0
+        ? (
+          <Text dimColor>
+            Suggestions: {autoSuggestions.slice(0, 5).join(" · ")}
+          </Text>
+        )
+        : null}
+    </Box>
+  );
+}
+
+function ShellWorkspace({ context, vaultDisplay }: ShellWorkspaceProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const { setRawMode, isRawModeSupported } = useStdin();
+  const navigate = useNavigate();
+  const location = useLocation();
   const terminalRows = useTerminalRows();
   const scrollRef = useRef<ScrollViewRef>(null);
   const [input, setInput] = useState("");
@@ -121,14 +180,15 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
     { id: 1, text: "Welcome to sam. Try /index, /connect, or /config." },
   ]);
   const [busy, setBusy] = useState(false);
-  const [indexProgress, setIndexProgress] = useState<{
-    phase: string;
-    done: number;
-    total: number;
-    phaseStartedAt: number;
-  } | null>(null);
+  const [indexProgress, setIndexProgress] = useState<
+    {
+      phase: string;
+      done: number;
+      total: number;
+      phaseStartedAt: number;
+    } | null
+  >(null);
   const [staleHint, setStaleHint] = useState<string | null>(null);
-  const [uiMode, setUiMode] = useState<UiMode>("shell");
   const [settingsDraft, setSettingsDraft] = useState<SettingsDraft>({
     vault: context.config.vault ?? "",
     model: context.config.model ?? "",
@@ -136,28 +196,60 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
     embeddingModel: context.config.embeddingModel ?? "",
     embeddingBaseUrl: context.config.embeddingBaseUrl ?? "",
   });
-  const [editingField, setEditingField] = useState<SettingsField | null>(null);
   const [editBuffer, setEditBuffer] = useState("");
   const [autocompleteIndex, setAutocompleteIndex] = useState(0);
   const [vaultSuggestions, setVaultSuggestions] = useState<string[]>([]);
 
+  const fieldMatch = matchPath("/config/:field", location.pathname);
+  const editingField = normalizeSettingsField(fieldMatch?.params.field);
+  const isUnknownEditRoute = Boolean(fieldMatch && !editingField);
+  const isShellHome = location.pathname === "/";
+  const isSettingsMenu = location.pathname === "/config";
+  const isSettingsEdit = editingField !== null;
+  const isKnownRoute = isShellHome || isSettingsMenu || isSettingsEdit;
+
+  useEffect(() => {
+    if (isUnknownEditRoute) {
+      navigate("/config", { replace: true });
+      return;
+    }
+    if (!isKnownRoute) {
+      navigate("/", { replace: true });
+    }
+  }, [isKnownRoute, isUnknownEditRoute, navigate]);
+
+  useEffect(() => {
+    if (!editingField) return;
+    setEditBuffer(settingsDraft[editingField] ?? "");
+    setAutocompleteIndex(0);
+  }, [editingField, settingsDraft]);
+
   const prompt = useMemo(() => {
     if (busy && !indexProgress) return "sam (busy)> ";
     if (busy) return "sam> ";
-    if (uiMode === "settings-menu") return "settings> ";
-    if (uiMode === "settings-edit" && editingField) return `edit ${editingField}> `;
+    if (isSettingsMenu) return "config> ";
+    if (editingField) return `config/${editingField}> `;
     return "sam> ";
-  }, [busy, indexProgress, uiMode, editingField]);
+  }, [busy, indexProgress, isSettingsMenu, editingField]);
 
   const footerContext = useMemo(() => {
     if (busy && indexProgress) return "Indexing";
     if (busy) return "Busy";
-    if (uiMode === "settings-edit" && editingField) {
-      return `Settings · edit ${FIELD_LABELS[editingField]}`;
+    if (editingField) return `Settings · edit ${FIELD_LABELS[editingField]}`;
+    if (isSettingsMenu) return "Settings";
+    return "Home shell";
+  }, [busy, indexProgress, editingField, isSettingsMenu]);
+
+  const footerActions = useMemo(() => {
+    if (busy) return "Wait for index run to finish · Ctrl+C quit";
+    if (editingField) {
+      return "Type value · Tab autocomplete · Enter apply · Esc settings";
     }
-    if (uiMode === "settings-menu") return "Settings";
-    return "sam";
-  }, [busy, indexProgress, uiMode, editingField]);
+    if (isSettingsMenu) {
+      return "↑↓ pick field · Enter edit · S save · Esc shell";
+    }
+    return "/connect similar notes · /config settings · /index refresh index · /help routes";
+  }, [busy, editingField, isSettingsMenu]);
 
   const pushMessage = (text: string) => {
     setMessages((prev: ShellMessage[]) => {
@@ -180,8 +272,12 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
     if (!editingField) return [];
     if (editingField === "vault") return trimSuggestions(vaultSuggestions);
     if (editingField === "model") return trimSuggestions(POPULAR_MODELS);
-    if (editingField === "embeddingProvider") return trimSuggestions(EMBED_PROVIDER_SUGGESTIONS);
-    if (editingField === "embeddingModel") return trimSuggestions(EMBED_MODEL_SUGGESTIONS);
+    if (editingField === "embeddingProvider") {
+      return trimSuggestions(EMBED_PROVIDER_SUGGESTIONS);
+    }
+    if (editingField === "embeddingModel") {
+      return trimSuggestions(EMBED_MODEL_SUGGESTIONS);
+    }
     return trimSuggestions(EMBED_BASE_URL_SUGGESTIONS);
   }, [editingField, vaultSuggestions]);
 
@@ -189,11 +285,10 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
     scrollRef.current?.scrollToBottom();
   }, [messages]);
 
-  /** Re-enable raw mode after `ink-select-input` unmounts (its useInput cleanup calls setRawMode(false)). */
   useLayoutEffect(() => {
     if (!isRawModeSupported) return;
     setRawMode(true);
-  }, [uiMode, isRawModeSupported, setRawMode]);
+  }, [location.pathname, isRawModeSupported, setRawMode]);
 
   useEffect(() => {
     const onResize = () => scrollRef.current?.remeasure();
@@ -219,23 +314,32 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
 
       try {
         const evalResult = await vault.eval(
-          'JSON.stringify(app.vault.getMarkdownFiles().map(f=>({path:f.path,mtime:f.stat.mtime})))',
+          "JSON.stringify(app.vault.getMarkdownFiles().map(f=>({path:f.path,mtime:f.stat.mtime})))",
         );
-        const files = JSON.parse(evalResult) as Array<{ path: string; mtime: number }>;
+        const files = JSON.parse(evalResult) as Array<
+          { path: string; mtime: number }
+        >;
         const profileDir = await resolveActiveProfileDir(context.config);
         const manifest = await readManifest(profileDir);
         const summary = classifyStaleness(manifest, files);
-        const changed = summary.newPaths.length + summary.modifiedPaths.length + summary.deletedPaths.length;
+        const changed = summary.newPaths.length + summary.modifiedPaths.length +
+          summary.deletedPaths.length;
         if (!cancelled && changed > 0) {
-          setStaleHint(`${changed} notes changed since last index — run sam index to update.`);
+          setStaleHint(
+            `${changed} notes changed since last index — run sam index to update.`,
+          );
         }
       } catch (error) {
         if (!cancelled) {
           const message = String((error as Error).message ?? error);
           if (message.includes(OBSIDIAN_CONNECTION_ERROR)) {
-            setStaleHint("Obsidian CLI is available but not connected. Open Obsidian and retry.");
+            setStaleHint(
+              "Obsidian CLI is available but not connected. Open Obsidian and retry.",
+            );
           } else if (message.includes(OBSIDIAN_MISSING_ERROR)) {
-            setStaleHint("Obsidian CLI not found in PATH. Install/enable Obsidian CLI.");
+            setStaleHint(
+              "Obsidian CLI not found in PATH. Install/enable Obsidian CLI.",
+            );
           } else {
             setStaleHint("Could not check index staleness.");
           }
@@ -248,23 +352,25 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
     };
   }, [context.config]);
 
-  const startSettingsMenu = async () => {
+  const openSettingsMenu = async () => {
     const file = await loadConfigFile();
     const draft = draftFromConfig(file, context);
     setSettingsDraft(draft);
-    setUiMode("settings-menu");
-    setEditingField(null);
-    setEditBuffer("");
     setAutocompleteIndex(0);
-    pushMessage("🎛️  Settings opened. ↑/↓ or j/k · Enter edit · S save · Esc cancel.");
+    navigate("/config");
+    pushMessage(
+      "🎛️  Settings opened. Route is now /config. ↑/↓ select · Enter edit · S save · Esc shell.",
+    );
   };
 
   const beginEditingField = (field: SettingsField) => {
-    setEditingField(field);
-    setEditBuffer(settingsDraft[field] ?? "");
     setAutocompleteIndex(0);
-    setUiMode("settings-edit");
-    pushMessage(`Editing ${FIELD_LABELS[field]}. Tab suggestions · Enter apply · Esc cancel.`);
+    navigate(settingsFieldPath(field));
+    pushMessage(
+      `Editing ${FIELD_LABELS[field]} at ${
+        settingsFieldPath(field)
+      }. Tab suggestions · Enter apply · Esc settings.`,
+    );
   };
 
   const saveSettings = async () => {
@@ -273,14 +379,17 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
       ...file,
       vault: settingsDraft.vault || undefined,
       model: settingsDraft.model || undefined,
-      embeddingProvider: (settingsDraft.embeddingProvider as SamConfigFile["embeddingProvider"]) || undefined,
+      embeddingProvider: (settingsDraft
+        .embeddingProvider as SamConfigFile["embeddingProvider"]) ||
+        undefined,
       embeddingModel: settingsDraft.embeddingModel || undefined,
       embeddingBaseUrl: settingsDraft.embeddingBaseUrl || undefined,
     };
     await saveConfigFile(merged);
-    setUiMode("shell");
-    setEditingField(null);
-    pushMessage("✨ Settings saved! Restart sam to apply config resolution changes.");
+    navigate("/");
+    pushMessage(
+      "✨ Settings saved! Restart sam to apply config resolution changes.",
+    );
   };
 
   const applyEditedValue = () => {
@@ -290,23 +399,23 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
       ...prev,
       [field]: editBuffer.trim(),
     }));
-    setUiMode("settings-menu");
-    setEditingField(null);
+    navigate("/config");
     pushMessage(`${FIELD_LABELS[field]} updated.`);
   };
 
   useInput(
     async (char, key) => {
+      if (location.pathname === "/connect") return;
       if (busy) return;
+
       if (key.ctrl && char === "c") {
         exit();
         return;
       }
 
-      if (uiMode === "settings-edit") {
+      if (editingField) {
         if (key.escape) {
-          setUiMode("settings-menu");
-          setEditingField(null);
+          navigate("/config");
           setEditBuffer("");
           pushMessage("Edit canceled.");
           return;
@@ -316,9 +425,12 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
           return;
         }
         if (key.tab && autoSuggestions.length > 0) {
-          const next = autoSuggestions[autocompleteIndex % autoSuggestions.length];
+          const next =
+            autoSuggestions[autocompleteIndex % autoSuggestions.length];
           setEditBuffer(next);
-          setAutocompleteIndex((idx: number) => (idx + 1) % autoSuggestions.length);
+          setAutocompleteIndex((idx: number) =>
+            (idx + 1) % autoSuggestions.length
+          );
           return;
         }
         if (key.backspace || key.delete) {
@@ -331,9 +443,9 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
         return;
       }
 
-      if (uiMode === "settings-menu") {
+      if (isSettingsMenu) {
         if (key.escape) {
-          setUiMode("shell");
+          navigate("/");
           pushMessage("Settings closed (no save).");
           return;
         }
@@ -341,7 +453,11 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
           try {
             await saveSettings();
           } catch (error) {
-            pushMessage(`Failed to save settings: ${String((error as Error).message ?? error)}`);
+            pushMessage(
+              `Failed to save settings: ${
+                String((error as Error).message ?? error)
+              }`,
+            );
           }
           return;
         }
@@ -349,41 +465,51 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
       }
 
       if (key.return) {
-        const route = parseRoute(input);
-        const raw = input.trim();
+        const command = parseShellCommand(input);
         setInput("");
 
-        if (route === "" && raw === "") {
-          return;
-        }
-
-        if (route === "/config") {
-          try {
-            await startSettingsMenu();
-          } catch (error) {
-            pushMessage(`Failed to open settings: ${String((error as Error).message ?? error)}`);
+        if (command.kind === "noop") return;
+        if (command.kind === "navigate") {
+          if (command.path === "/config") {
+            try {
+              await openSettingsMenu();
+            } catch (error) {
+              pushMessage(
+                `Failed to open settings: ${
+                  String((error as Error).message ?? error)
+                }`,
+              );
+            }
+            return;
+          }
+          navigate(command.path);
+          if (command.path === "/connect") {
+            pushMessage("Navigating to /connect.");
           }
           return;
         }
-        if (route === "") {
+        if (command.kind === "unknown") {
           pushMessage("Unknown command. Try /help.");
           return;
         }
-        if (route === "help") {
-          pushMessage("Routes: /new, /index, /connect, /config (/settings alias), /help. Ctrl+C exits.");
+        if (command.kind === "help") {
+          pushMessage(
+            "Routes: /home, /connect, /config, /config/<field>. Commands: /new, /index, /help. Ctrl+C exits.",
+          );
           return;
         }
-        if (route === "/connect") {
-          onOpenConnect();
-          return;
-        }
-        if (route === "/new") {
+        if (command.kind === "new") {
           pushMessage("/new is planned for Phase 1.");
           return;
         }
-        if (route === "/index") {
+        if (command.kind === "index") {
           setBusy(true);
-          setIndexProgress({ phase: "Starting", done: 0, total: 1, phaseStartedAt: Date.now() });
+          setIndexProgress({
+            phase: "Starting",
+            done: 0,
+            total: 1,
+            phaseStartedAt: Date.now(),
+          });
           pushMessage("Starting index run...");
           try {
             const result = await executeIndex(
@@ -391,7 +517,13 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
               { flags: {}, positionals: [] },
               (patch) => {
                 setIndexProgress((prev) => {
-                  const base = prev ?? { phase: "Starting", done: 0, total: 1, phaseStartedAt: Date.now() };
+                  const base = prev ??
+                    {
+                      phase: "Starting",
+                      done: 0,
+                      total: 1,
+                      phaseStartedAt: Date.now(),
+                    };
                   return {
                     phase: patch.phase ?? base.phase,
                     done: patch.done ?? base.done,
@@ -408,7 +540,9 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
           } catch (error) {
             const message = String((error as Error).message ?? error);
             if (message.includes(OBSIDIAN_CONNECTION_ERROR)) {
-              pushMessage("Index failed: Obsidian is not connected. Open Obsidian and retry.");
+              pushMessage(
+                "Index failed: Obsidian is not connected. Open Obsidian and retry.",
+              );
             } else if (message.includes(OBSIDIAN_MISSING_ERROR)) {
               pushMessage("Index failed: Obsidian CLI not found in PATH.");
             } else {
@@ -418,10 +552,6 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
             setBusy(false);
             setIndexProgress(null);
           }
-          return;
-        }
-        if (raw) {
-          pushMessage("Unknown command. Try /help.");
         }
         return;
       }
@@ -436,7 +566,7 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
     },
   );
 
-  const promptValue = uiMode === "settings-edit" ? editBuffer : input;
+  const promptValue = editingField ? editBuffer : input;
 
   return (
     <ShellFrame
@@ -444,16 +574,11 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
       terminalRows={terminalRows}
       footerVault={vaultDisplay}
       footerContext={footerContext}
+      footerRoute={location.pathname}
+      footerActions={footerActions}
       prompt={prompt}
       promptValue={promptValue}
     >
-      {uiMode === "shell"
-        ? (
-          <Box flexShrink={0}>
-            <Text dimColor>Type /help for routes.</Text>
-          </Box>
-        )
-        : null}
       {staleHint
         ? (
           <Box flexShrink={0}>
@@ -477,36 +602,30 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
         </ScrollView>
       </Box>
 
-      {uiMode === "settings-menu"
-        ? (
-          <Box marginTop={1} flexDirection="column" flexShrink={0}>
-            <Text color="magenta">⚙️  Settings</Text>
-            <Text dimColor>Enter edit · S save · Esc cancel · 1–5 jump</Text>
-            <SelectInput
-              items={settingsItems}
-              onSelect={(item) => beginEditingField(item.value as SettingsField)}
-              limit={6}
+      <Routes>
+        <Route path="/" element={<ShellHomePanel />} />
+        <Route
+          path="/config"
+          element={
+            <SettingsMenuPanel
+              settingsItems={settingsItems}
+              onSelect={beginEditingField}
             />
-          </Box>
-        )
-        : null}
-
-      {uiMode === "settings-edit" && editingField
-        ? (
-          <Box marginTop={1} flexDirection="column" flexShrink={0}>
-            <Text color="green">Editing {FIELD_LABELS[editingField]}</Text>
-            <Text dimColor>Tab autocomplete · Enter apply · Esc cancel</Text>
-            <Text>{editBuffer}</Text>
-            {autoSuggestions.length > 0
-              ? (
-                <Text dimColor>
-                  Suggestions: {autoSuggestions.slice(0, 5).join(" · ")}
-                </Text>
-              )
-              : null}
-          </Box>
-        )
-        : null}
+          }
+        />
+        <Route
+          path="/config/:field"
+          element={editingField
+            ? (
+              <SettingsEditPanel
+                editingField={editingField}
+                editBuffer={editBuffer}
+                autoSuggestions={autoSuggestions}
+              />
+            )
+            : null}
+        />
+      </Routes>
 
       {busy && indexProgress
         ? (
@@ -524,24 +643,36 @@ function ShellMain({ context, onOpenConnect, vaultDisplay }: ShellMainProps) {
   );
 }
 
-export function Shell(props: ShellProps) {
-  const [flow, setFlow] = useState<"main" | "connect">("main");
-  const vaultDisplay = useVaultDisplay(props.context);
+function ShellRoutes({ context }: ShellProps) {
+  const navigate = useNavigate();
+  const vaultDisplay = useVaultDisplay(context);
 
-  if (flow === "connect") {
-    return (
-      <ConnectFlow
-        context={props.context}
-        vaultDisplay={vaultDisplay}
-        onExit={() => setFlow("main")}
-      />
-    );
-  }
   return (
-    <ShellMain
-      context={props.context}
-      vaultDisplay={vaultDisplay}
-      onOpenConnect={() => setFlow("connect")}
-    />
+    <Routes>
+      <Route
+        path="/connect"
+        element={
+          <ConnectFlow
+            context={context}
+            vaultDisplay={vaultDisplay}
+            onExit={() => navigate("/")}
+          />
+        }
+      />
+      <Route
+        path="*"
+        element={
+          <ShellWorkspace context={context} vaultDisplay={vaultDisplay} />
+        }
+      />
+    </Routes>
+  );
+}
+
+export function Shell(props: ShellProps) {
+  return (
+    <MemoryRouter initialEntries={["/"]}>
+      <ShellRoutes context={props.context} />
+    </MemoryRouter>
   );
 }

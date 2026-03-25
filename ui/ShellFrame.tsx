@@ -10,13 +10,26 @@ export interface ShellFrameProps {
   terminalRows: number;
   footerVault: string;
   footerContext: string;
+  footerRoute?: string;
+  footerActions?: string;
   prompt: string;
   promptValue: string;
   children: ReactNode;
 }
 
 export function ShellFrame(
-  { variant = "home", subTitle, terminalRows, footerVault, footerContext, prompt, promptValue, children }: ShellFrameProps,
+  {
+    variant = "home",
+    subTitle,
+    terminalRows,
+    footerVault,
+    footerContext,
+    footerRoute,
+    footerActions,
+    prompt,
+    promptValue,
+    children,
+  }: ShellFrameProps,
 ) {
   return (
     <Box flexDirection="column" width="100%">
@@ -58,13 +71,29 @@ export function ShellFrame(
         gap={0}
       >
         <Text>
-          <Text color="cyan" bold>Vault </Text>
+          <Text color="cyan" bold>Vault</Text>
           <Text dimColor>{footerVault}</Text>
         </Text>
         <Text>
-          <Text color="magenta" bold>Mode </Text>
+          <Text color="magenta" bold>Mode</Text>
           <Text dimColor>{footerContext}</Text>
         </Text>
+        {footerRoute
+          ? (
+            <Text>
+              <Text color="yellow" bold>Where</Text>
+              <Text dimColor>{footerRoute}</Text>
+            </Text>
+          )
+          : null}
+        {footerActions
+          ? (
+            <Text>
+              <Text color="blue" bold>Actions</Text>
+              <Text dimColor>{footerActions}</Text>
+            </Text>
+          )
+          : null}
         <Text>
           <Text color="green">{prompt}</Text>
           {promptValue}
