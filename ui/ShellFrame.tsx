@@ -19,7 +19,7 @@ export function ShellFrame(
   { variant = "home", subTitle, terminalRows, footerVault, footerContext, prompt, promptValue, children }: ShellFrameProps,
 ) {
   return (
-    <Box flexDirection="column" height={terminalRows} width="100%">
+    <Box flexDirection="column" width="100%">
       {variant === "home"
         ? (
           <Box flexDirection="column" marginBottom={1} flexShrink={0}>

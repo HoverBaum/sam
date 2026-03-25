@@ -173,14 +173,14 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
     if (phase === "results") return "Connect · results";
     if (phase === "loading") return "Connect · searching";
     if (phase === "empty" || phase === "error") return "Connect";
-    return "Connect · similar notes";
+    return "Connect · similar notes and sections";
   }, [phase]);
 
   if (phase === "empty") {
     return (
       <ShellFrame
         variant="sub"
-        subTitle="Similar notes"
+        subTitle="Similar notes and sections"
         terminalRows={terminalRows}
         footerVault={vaultDisplay}
         footerContext={footerContext}
@@ -198,7 +198,7 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
     return (
       <ShellFrame
         variant="sub"
-        subTitle="Similar notes"
+        subTitle="Similar notes and sections"
         terminalRows={terminalRows}
         footerVault={vaultDisplay}
         footerContext={footerContext}
@@ -215,7 +215,7 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
     return (
       <ShellFrame
         variant="sub"
-        subTitle="Similar notes"
+        subTitle="Similar notes and sections"
         terminalRows={terminalRows}
         footerVault={vaultDisplay}
         footerContext={footerContext}
@@ -236,7 +236,7 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
     return (
       <ShellFrame
         variant="sub"
-        subTitle="Similar notes (cosine similarity)"
+        subTitle="Similar notes and sections (cosine similarity)"
         terminalRows={terminalRows}
         footerVault={vaultDisplay}
         footerContext={footerContext}
@@ -247,11 +247,17 @@ export function ConnectFlow({ context, vaultDisplay, onExit }: ConnectFlowProps)
         {results.length === 0
           ? <Text dimColor>No other indexed notes to compare.</Text>
           : results.map((hit, i) => (
-            <Text key={hit.id}>
-              {`${i + 1}  ${String(Math.round(hit.score * 100)).padStart(3, " ")}%  ${hit.title}  `}
-              <Text dimColor>{hit.id}</Text>
-            </Text>
-          ))}
+              <Text key={hit.id}>
+                {`${i + 1}  ${String(Math.round(hit.score * 100)).padStart(3, " ")}%  ${hit.title}  `}
+                <Text dimColor>
+                  {hit.kind === "section" && hit.sectionPath
+                    ? `${hit.path} · ${hit.sectionPath}${hit.sourceSectionPath ? ` · via ${hit.sourceSectionPath}` : ""}`
+                    : hit.sourceSectionPath
+                    ? `${hit.id} · via ${hit.sourceSectionPath}`
+                    : hit.id}
+                </Text>
+              </Text>
+            ))}
       </ShellFrame>
     );
   }

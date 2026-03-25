@@ -6,6 +6,7 @@ import {
 } from "../commands/index.tsx";
 import type { RuntimeConfig } from "../config.ts";
 import {
+  INDEX_SCHEMA_VERSION,
   readManifest,
   readStore,
   resolveProfileDir,
@@ -65,6 +66,7 @@ Deno.test("executeIndex continues on embed errors for shell runs and preserves p
         provider: context.config.embeddingProvider,
         model: context.config.embeddingModel,
         dimensions: 2,
+        schemaVersion: INDEX_SCHEMA_VERSION,
       },
       files: {
         "stale.md": { contentHash: "old-hash", indexedAt: 1 },
@@ -77,6 +79,14 @@ Deno.test("executeIndex continues on embed errors for shell runs and preserves p
           id: "stale.md",
           vector: [1, 0],
           metadata: { path: "stale.md", title: "stale" },
+        },
+      ],
+      [
+        "stale.md#topic",
+        {
+          id: "stale.md#topic",
+          vector: [1, 0],
+          metadata: { kind: "section", path: "stale.md", title: "Topic", sectionPath: "Topic" },
         },
       ],
     ]));
@@ -116,6 +126,7 @@ Deno.test("executeIndex continues on embed errors for shell runs and preserves p
     const store = await readStore(profileDir);
     assertEquals(store.get("fresh.md")?.vector, [0, 1]);
     assertEquals(store.get("stale.md")?.vector, [1, 0]);
+    assertEquals(store.get("stale.md#topic")?.vector, [1, 0]);
   });
 });
 
@@ -254,6 +265,92 @@ Deno.test("executeIndex skips empty files without embedding or failing", async (
     const manifest = await readManifest(profileDir);
     assertEquals(manifest?.files["ok.md"]?.indexedAt, 10);
     assertEquals(manifest?.files["empty.md"], undefined);
+  });
+});
+
+Deno.test("executeIndex writes section entries and replaces stale derived entries on reindex", async () => {
+  await withTempHome(async () => {
+    const context = testContext();
+    const profileDir = await resolveProfileDir(context.config, 2);
+    await writeManifest(profileDir, {
+      profile: {
+        provider: context.config.embeddingProvider,
+        model: context.config.embeddingModel,
+        dimensions: 2,
+        schemaVersion: INDEX_SCHEMA_VERSION,
+      },
+      files: {
+        "note.md": { contentHash: "old", indexedAt: 1 },
+      },
+    });
+    await writeStore(profileDir, new Map([
+      [
+        "note.md",
+        {
+          id: "note.md",
+          vector: [0, 1],
+          metadata: { kind: "note", path: "note.md", title: "note" },
+        },
+      ],
+      [
+        "note.md#old-section",
+        {
+          id: "note.md#old-section",
+          vector: [0, 1],
+          metadata: { kind: "section", path: "note.md", title: "Old Section", sectionPath: "Old Section" },
+        },
+      ],
+    ]));
+
+    const content = [
+      "# Intro",
+      "",
+      "This introduction has enough text to be embedded as a section.",
+      "",
+      "## Details",
+      "",
+      "These details are also long enough to produce a section embedding.",
+      "",
+      "# Wrap Up",
+      "",
+      "This ending paragraph should also count as its own section chunk.",
+    ].join("\n");
+
+    const result = await executeIndex(
+      context,
+      { flags: {}, positionals: [] },
+      () => {},
+      {
+        createVaultClient: () => ({
+          files: async () => ["note.md"],
+          fileStats: fileStats({ "note.md": 5 }),
+          read: async () => content,
+          outline: async () => [{
+            title: "Intro",
+            level: 1,
+            children: [{ title: "Details", level: 2, children: [] }],
+          }, {
+            title: "Wrap Up",
+            level: 1,
+            children: [],
+          }],
+        }),
+        embedText: async (_config, text) => text.includes("Details") ? [0, 1] : [1, 0],
+        now: () => 10,
+      },
+    );
+
+    assertEquals(result.indexedCount, 1);
+    const manifest = await readManifest(profileDir);
+    assertEquals(manifest?.profile.schemaVersion, INDEX_SCHEMA_VERSION);
+    assertEquals(manifest?.files["note.md"]?.indexedAt, 10);
+
+    const store = await readStore(profileDir);
+    assertEquals(store.has("note.md#old-section"), false);
+    assertEquals(store.has("note.md"), true);
+    assertEquals(store.has("note.md#intro"), true);
+    assertEquals(store.has("note.md#intro-details"), true);
+    assertEquals(store.has("note.md#wrap-up"), true);
   });
 });
 

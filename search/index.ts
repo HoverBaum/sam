@@ -1,12 +1,17 @@
 import { existsSync } from "@std/fs";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import { getSamHome, type RuntimeConfig } from "../config.ts";
 import { buildProfileId } from "./embed.ts";
+
+export const INDEX_SCHEMA_VERSION = 2;
+
+export type IndexItemKind = "note" | "section";
 
 export interface ManifestProfile {
   provider: string;
   model: string;
   dimensions: number;
+  schemaVersion: number;
 }
 
 export interface ManifestEntry {
@@ -26,6 +31,9 @@ export interface IndexItem {
     path: string;
     title?: string;
     summary?: string;
+    kind?: IndexItemKind;
+    sectionPath?: string;
+    sectionLevel?: number;
   };
 }
 
@@ -47,6 +55,10 @@ export interface ManifestSummary {
 
 function unknownProfilePrefix(config: RuntimeConfig): string {
   return `${config.embeddingProvider}_${config.embeddingModel}`.replace(/[^\w.-]+/g, "_");
+}
+
+function schemaVersionOf(manifest: IndexManifest): number {
+  return manifest.profile.schemaVersion ?? 1;
 }
 
 async function indexRoot(): Promise<string> {
@@ -75,7 +87,11 @@ export async function resolveActiveProfileDir(config: RuntimeConfig): Promise<st
     if (!dir.startsWith(prefix)) continue;
     const manifest = await readManifest(join(root, dir));
     if (!manifest) continue;
-    if (manifest.profile.provider === config.embeddingProvider && manifest.profile.model === config.embeddingModel) {
+    if (
+      manifest.profile.provider === config.embeddingProvider &&
+      manifest.profile.model === config.embeddingModel &&
+      schemaVersionOf(manifest) === INDEX_SCHEMA_VERSION
+    ) {
       matches.push({ dir, manifest });
     }
   }
@@ -131,8 +147,40 @@ export function assertProfileMatch(config: RuntimeConfig, manifest: IndexManifes
   if (manifest.profile.provider !== config.embeddingProvider || manifest.profile.model !== config.embeddingModel) {
     throw new Error("Index profile mismatch. Run `sam index --rebuild`.");
   }
+  if (schemaVersionOf(manifest) !== INDEX_SCHEMA_VERSION) {
+    throw new Error("Index schema mismatch. Run `sam index --rebuild`.");
+  }
   if (dims !== undefined && manifest.profile.dimensions !== dims) {
     throw new Error("Index dimensions mismatch. Run `sam index --rebuild`.");
+  }
+}
+
+export function indexItemKind(item: IndexItem): IndexItemKind {
+  return item.metadata.kind ?? "note";
+}
+
+export function isNoteItem(item: IndexItem): boolean {
+  return indexItemKind(item) === "note";
+}
+
+export function buildNoteTitle(path: string): string {
+  return basename(path).replace(/\.md$/i, "");
+}
+
+export function formatHitTitle(item: IndexItem): string {
+  if (indexItemKind(item) === "section") {
+    const noteTitle = buildNoteTitle(item.metadata.path);
+    const sectionPath = item.metadata.sectionPath ?? item.metadata.title ?? item.id;
+    return `${noteTitle} > ${sectionPath}`;
+  }
+  return item.metadata.title ?? item.metadata.path;
+}
+
+export function deleteEntriesForPath(store: Map<string, IndexItem>, path: string): void {
+  for (const [itemId, item] of store.entries()) {
+    if (item.metadata.path === path) {
+      store.delete(itemId);
+    }
   }
 }
 
@@ -183,6 +231,23 @@ export interface NeighborHit {
   title: string;
   summary: string;
   score: number;
+  kind: IndexItemKind;
+  path: string;
+  sectionPath?: string;
+  sourceKind?: IndexItemKind;
+  sourceSectionPath?: string;
+}
+
+function toNeighborHit(item: IndexItem, score: number): NeighborHit {
+  return {
+    id: item.id,
+    title: formatHitTitle(item),
+    summary: item.metadata.summary ?? "",
+    score,
+    kind: indexItemKind(item),
+    path: item.metadata.path,
+    sectionPath: item.metadata.sectionPath,
+  };
 }
 
 /** Pure ranking: cosine similarity to `sourcePath`'s vector, excluding the source note. */
@@ -191,19 +256,31 @@ export function rankNearestNeighbors(
   sourcePath: string,
   k: number,
 ): NeighborHit[] {
-  const source = store.get(sourcePath);
-  if (!source) {
+  const sourceItems = [...store.values()].filter((item) => item.metadata.path === sourcePath);
+  if (sourceItems.length === 0) {
     throw new Error(`Note not in index: ${sourcePath}. Run \`sam index\` to index this note.`);
   }
-  const vector = source.vector;
-  return [...store.values()]
-    .filter((item) => item.id !== sourcePath)
-    .map((item) => ({
-      id: item.id,
-      title: item.metadata.title ?? item.metadata.path,
-      summary: item.metadata.summary ?? "",
-      score: cosine(item.vector, vector),
-    }))
+
+  const bestHits = new Map<string, NeighborHit>();
+  for (const sourceItem of sourceItems) {
+    for (const item of store.values()) {
+      if (item.metadata.path === sourcePath) {
+        continue;
+      }
+      const score = cosine(item.vector, sourceItem.vector);
+      const existing = bestHits.get(item.id);
+      if (existing && existing.score >= score) {
+        continue;
+      }
+      bestHits.set(item.id, {
+        ...toNeighborHit(item, score),
+        sourceKind: indexItemKind(sourceItem),
+        sourceSectionPath: sourceItem.metadata.sectionPath,
+      });
+    }
+  }
+
+  return [...bestHits.values()]
     .sort((a, b) => b.score - a.score)
     .slice(0, Math.max(0, k));
 }
@@ -231,7 +308,7 @@ export async function query(
   config: RuntimeConfig,
   vector: number[],
   topN: number,
-): Promise<Array<{ id: string; title: string; summary: string; score: number }>> {
+): Promise<NeighborHit[]> {
   const dir = await resolveActiveProfileDir(config);
   const manifest = await readManifest(dir);
   if (!manifest) {
@@ -241,12 +318,7 @@ export async function query(
 
   const store = await readStore(dir);
   return [...store.values()]
-    .map((item) => ({
-      id: item.id,
-      title: item.metadata.title ?? item.metadata.path,
-      summary: item.metadata.summary ?? "",
-      score: cosine(item.vector, vector),
-    }))
+    .map((item) => toNeighborHit(item, cosine(item.vector, vector)))
     .sort((a, b) => b.score - a.score)
     .slice(0, topN);
 }

@@ -1,5 +1,5 @@
 import { basename } from "@std/path";
-import type { IndexItem, IndexManifest } from "./index.ts";
+import { isNoteItem, type IndexItem, type IndexManifest } from "./index.ts";
 
 const DEFAULT_MAX = 10;
 
@@ -42,7 +42,8 @@ export function filterNotePaths(query: string, paths: string[], maxResults: numb
 export function resolvePickedNotePath(input: string, indexedPaths: string[], store: Map<string, IndexItem>): string | null {
   const t = input.trim();
   if (!t) return null;
-  if (store.has(t)) return t;
+  const direct = store.get(t);
+  if (direct && isNoteItem(direct)) return t;
   const exactPath = indexedPaths.filter((p) => p === t);
   if (exactPath.length === 1) return exactPath[0];
   const baseMatches = indexedPaths.filter((p) => basename(p) === t);

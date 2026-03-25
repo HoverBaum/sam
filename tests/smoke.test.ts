@@ -1,6 +1,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { parseArgs } from "../utils/args.ts";
 import {
+  INDEX_SCHEMA_VERSION,
   assertProfileMatch,
   indexManifestSummary,
   type IndexManifest,
@@ -26,6 +27,7 @@ Deno.test("assertProfileMatch throws on provider/model mismatch", () => {
       provider: "ollama",
       model: "nomic-embed-text",
       dimensions: 768,
+      schemaVersion: INDEX_SCHEMA_VERSION,
     },
     files: {},
   };

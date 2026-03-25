@@ -22,6 +22,12 @@ export interface FileStatEntry {
   mtime: number;
 }
 
+export interface OutlineNode {
+  title: string;
+  level: number;
+  children: OutlineNode[];
+}
+
 function decode(bytes: Uint8Array): string {
   return new TextDecoder().decode(bytes).trim();
 }
@@ -145,6 +151,42 @@ function readFileStatMap(payload: unknown): Record<string, number> {
   return out;
 }
 
+function normalizeOutlineLevel(level: number | undefined, fallback: number): number {
+  if (level === undefined || !Number.isFinite(level)) {
+    return fallback;
+  }
+  return Math.max(1, Math.min(6, Math.floor(level)));
+}
+
+function parseOutlineNode(value: unknown, fallbackLevel: number): OutlineNode | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const title = readString(record, ["title", "heading", "name", "text", "label"])?.trim();
+  if (!title) {
+    return undefined;
+  }
+  const level = normalizeOutlineLevel(
+    readNumber(record, ["level", "depth", "headingLevel", "heading_level"]),
+    fallbackLevel,
+  );
+  const rawChildren = record.children ?? record.items ?? record.headings ?? record.nodes ?? record.sections;
+  const children = Array.isArray(rawChildren)
+    ? rawChildren
+      .map((child) => parseOutlineNode(child, level + 1))
+      .filter((child): child is OutlineNode => child !== undefined)
+    : [];
+  return { title, level, children };
+}
+
+export function parseOutlineNodes(payload: unknown): OutlineNode[] {
+  const rows = toArrayPayload(payload);
+  return rows
+    .map((row) => parseOutlineNode(row, 1))
+    .filter((row): row is OutlineNode => row !== undefined);
+}
+
 async function runObsidian(
   config: RuntimeConfig,
   tokens: string[],
@@ -213,6 +255,11 @@ export class VaultClient {
 
   async read(path: string): Promise<string> {
     return runObsidian(this.config, ["read", `path=${path}`]);
+  }
+
+  async outline(path: string): Promise<OutlineNode[]> {
+    const stdout = await runObsidian(this.config, ["outline", `path=${path}`, "format=json"]);
+    return parseOutlineNodes(parseJson(stdout, "outline"));
   }
 
   async create(params: {

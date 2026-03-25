@@ -8,8 +8,11 @@ import { mapLimit } from "../utils/concurrency.ts";
 import { embed } from "../search/embed.ts";
 import {
   assertProfileMatch,
+  buildNoteTitle,
   classifyStaleness,
+  deleteEntriesForPath,
   hashContent,
+  INDEX_SCHEMA_VERSION,
   indexManifestSummary,
   readManifest,
   readStore,
@@ -18,8 +21,10 @@ import {
   writeManifest,
   writeStore,
   type IndexManifest,
+  type IndexItem,
 } from "../search/index.ts";
-import { type FileStatEntry, VaultClient } from "../vault/client.ts";
+import { buildSectionItemId, extractSectionChunks } from "../search/sections.ts";
+import { type FileStatEntry, type OutlineNode, VaultClient } from "../vault/client.ts";
 const DEFAULT_FAILURE_SAMPLE_LIMIT = 3;
 const DEFAULT_EMPTY_PATH_SAMPLE_LIMIT = 3;
 const INDEX_EMBED_CONCURRENCY = 4;
@@ -65,6 +70,7 @@ interface IndexVaultClient {
   files(ext?: string): Promise<string[]>;
   fileStats(paths: string[]): Promise<FileStatEntry[]>;
   read(path: string): Promise<string>;
+  outline?(path: string): Promise<OutlineNode[]>;
 }
 
 interface ExecuteIndexOptions {
@@ -79,7 +85,7 @@ interface ExecuteIndexOptions {
 interface IndexedTargetSuccess {
   path: string;
   contentHash: string;
-  vector?: number[];
+  items?: IndexItem[];
 }
 
 interface IndexedTargetFailure {
@@ -252,10 +258,37 @@ export async function executeIndex(
     }
 
     try {
+      const items: IndexItem[] = [];
       const vector = await embedText(context.config, content);
+      items.push({
+        id: path,
+        vector,
+        metadata: {
+          kind: "note",
+          path,
+          title: buildNoteTitle(path),
+        },
+      });
+
+      const outline = vault.outline ? await vault.outline(path) : [];
+      const sections = extractSectionChunks(content, outline);
+      for (const section of sections) {
+        const sectionVector = await embedText(context.config, section.text);
+        items.push({
+          id: buildSectionItemId(path, section.slug, 1),
+          vector: sectionVector,
+          metadata: {
+            kind: "section",
+            path,
+            title: section.heading,
+            sectionPath: section.path,
+            sectionLevel: section.level,
+          },
+        });
+      }
       completedTargets += 1;
       onProgress({ done: completedTargets, total: targetTotal });
-      return { path, contentHash, vector };
+      return { path, contentHash, items };
     } catch (error) {
       if (!continueOnEmbedError) {
         throw error;
@@ -276,7 +309,7 @@ export async function executeIndex(
     if ("skippedEmpty" in result) {
       emptySkippedPaths.push(result.path);
       delete manifestFiles[result.path];
-      store.delete(result.path);
+      deleteEntriesForPath(store, result.path);
       continue;
     }
     if ("failure" in result) {
@@ -286,13 +319,12 @@ export async function executeIndex(
       }
       continue;
     }
-    if (result.vector) {
-      dimensions ??= result.vector.length;
-      store.set(result.path, {
-        id: result.path,
-        vector: result.vector,
-        metadata: { path: result.path, title: result.path.replace(/\.md$/, "") },
-      });
+    if (result.items && result.items.length > 0) {
+      dimensions ??= result.items[0].vector.length;
+      deleteEntriesForPath(store, result.path);
+      for (const item of result.items) {
+        store.set(item.id, item);
+      }
     }
     manifestFiles[result.path] = { contentHash: result.contentHash, indexedAt };
     indexedCount += 1;
@@ -300,7 +332,7 @@ export async function executeIndex(
 
   for (const deletedPath of staleness.deletedPaths) {
     delete manifestFiles[deletedPath];
-    store.delete(deletedPath);
+    deleteEntriesForPath(store, deletedPath);
   }
 
   if (!dimensions) {
@@ -316,6 +348,7 @@ export async function executeIndex(
         provider: context.config.embeddingProvider,
         model: context.config.embeddingModel,
         dimensions,
+        schemaVersion: INDEX_SCHEMA_VERSION,
       },
       files: manifestFiles,
     };
