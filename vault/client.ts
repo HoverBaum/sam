@@ -1,3 +1,8 @@
+// The project is primarily compiled/executed under Deno, but some linters in
+// this environment don't load Deno's default lib definitions. This keeps
+// TypeScript happy without affecting runtime behavior.
+declare const Deno: any;
+
 import type { RuntimeConfig } from "../config.ts";
 
 export interface BacklinkEntry {
@@ -187,6 +192,17 @@ export function parseOutlineNodes(payload: unknown): OutlineNode[] {
     .filter((row): row is OutlineNode => row !== undefined);
 }
 
+export function parseOutlineStdout(stdout: string): OutlineNode[] {
+  const trimmed = stdout.trim();
+  // Obsidian sometimes returns a plain-text sentinel when a document has no headings.
+  // In that case we treat the outline as empty instead of failing JSON parsing.
+  const lower = trimmed.toLowerCase();
+  if (lower === "no headings found" || lower === "no headings found." || lower.includes("no headings found")) {
+    return [];
+  }
+  return parseOutlineNodes(parseJson(stdout, "outline"));
+}
+
 async function runObsidian(
   config: RuntimeConfig,
   tokens: string[],
@@ -200,7 +216,7 @@ async function runObsidian(
     return "";
   }
 
-  let result: Deno.CommandOutput;
+  let result: any;
   try {
     result = await new Deno.Command("obsidian", {
       args,
@@ -259,7 +275,7 @@ export class VaultClient {
 
   async outline(path: string): Promise<OutlineNode[]> {
     const stdout = await runObsidian(this.config, ["outline", `path=${path}`, "format=json"]);
-    return parseOutlineNodes(parseJson(stdout, "outline"));
+    return parseOutlineStdout(stdout);
   }
 
   async create(params: {

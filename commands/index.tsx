@@ -29,6 +29,10 @@ const DEFAULT_FAILURE_SAMPLE_LIMIT = 3;
 const DEFAULT_EMPTY_PATH_SAMPLE_LIMIT = 3;
 const INDEX_EMBED_CONCURRENCY = 4;
 
+// In some editor/linter environments, the Deno global types aren't picked up.
+// This is type-only and doesn't affect runtime behavior.
+declare const Deno: any;
+
 function ProgressView(props: { total: number; done: number; phase: string; phaseStartedAt: number }) {
   return (
     <IndexProgressLine
@@ -52,6 +56,9 @@ interface IndexRunState {
 export interface IndexFailure {
   path: string;
   message: string;
+  /** Extra diagnostics (optional, only used for debug reports). */
+  phase?: string;
+  rawErrorMessage?: string;
 }
 
 export interface IndexRunResult {
@@ -64,6 +71,8 @@ export interface IndexRunResult {
   failureSamples: IndexFailure[];
   skipEmbed: boolean;
   dryRun: boolean;
+  /** When enabled, a JSONL report describing every skipped/failed path. */
+  debugSkipReportPath?: string;
 }
 
 interface IndexVaultClient {
@@ -152,6 +161,9 @@ export function indexShellMessages(result: IndexRunResult): string[] {
   if (result.failedCount === 0) {
     const lines = [`Index run finished (${result.indexedCount} indexed, ${result.deletedCount} removed).`];
     lines.push(...emptyLines);
+    if (result.debugSkipReportPath) {
+      lines.push(`Debug skip report: ${result.debugSkipReportPath}`);
+    }
     return lines;
   }
 
@@ -168,6 +180,9 @@ export function indexShellMessages(result: IndexRunResult): string[] {
     );
   }
   messages.push(...emptyLines);
+  if (result.debugSkipReportPath) {
+    messages.push(`Debug skip report: ${result.debugSkipReportPath}`);
+  }
   return messages;
 }
 
@@ -180,6 +195,7 @@ export async function executeIndex(
   const rebuild = booleanFlag(args.flags, "rebuild");
   const skipEmbed = booleanFlag(args.flags, "skip-embed");
   const continueOnEmbedError = options.continueOnEmbedError ?? false;
+  const debugSkips = booleanFlag(args.flags, "debug-skips");
   const maxFailureSamples = Math.max(options.maxFailureSamples ?? DEFAULT_FAILURE_SAMPLE_LIMIT, 0);
   const embedConcurrency = Math.max(1, Math.floor(options.embedConcurrency ?? INDEX_EMBED_CONCURRENCY));
   const embedText = options.embedText ?? embed;
@@ -191,6 +207,11 @@ export async function executeIndex(
   if (existingManifest) {
     assertProfileMatch(context.config, existingManifest);
   }
+
+  const explicitTargets = args.positionals
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  const isExplicitRun = explicitTargets.length > 0;
 
   if (context.config.dryRun) {
     const summary = indexManifestSummary(existingManifest);
@@ -215,16 +236,31 @@ export async function executeIndex(
   }
 
   const vault = createVaultClient(context.config);
-  onProgress(progressPatch(now, { phase: "Listing markdown files", done: 0, total: 1 }));
-  const paths = (await vault.files("md")).filter((line) => line.endsWith(".md"));
+  let paths: string[];
+  let staleness: { newPaths: string[]; modifiedPaths: string[]; deletedPaths: string[]; currentPaths: string[] } = {
+    newPaths: [],
+    modifiedPaths: [],
+    deletedPaths: [],
+    currentPaths: [],
+  };
+  let targets: string[];
 
-  const pathTotal = Math.max(paths.length, 1);
-  onProgress(progressPatch(now, { phase: "Checking file timestamps", done: 0, total: pathTotal }));
-  const currentFiles = await vault.fileStats(paths);
-  onProgress({ done: pathTotal, total: pathTotal });
+  if (isExplicitRun) {
+    paths = explicitTargets;
+    targets = explicitTargets;
+    onProgress(progressPatch(now, { phase: "Indexing explicit targets", done: 0, total: Math.max(targets.length, 1) }));
+  } else {
+    onProgress(progressPatch(now, { phase: "Listing markdown files", done: 0, total: 1 }));
+    paths = (await vault.files("md")).filter((line) => line.endsWith(".md"));
 
-  const staleness = classifyStaleness(rebuild ? null : existingManifest, currentFiles);
-  const targets = rebuild ? currentFiles.map((f) => f.path) : [...staleness.newPaths, ...staleness.modifiedPaths];
+    const pathTotal = Math.max(paths.length, 1);
+    onProgress(progressPatch(now, { phase: "Checking file timestamps", done: 0, total: pathTotal }));
+    const currentFiles = await vault.fileStats(paths);
+    onProgress({ done: pathTotal, total: pathTotal });
+
+    staleness = classifyStaleness(rebuild ? null : existingManifest, currentFiles);
+    targets = rebuild ? currentFiles.map((f) => f.path) : [...staleness.newPaths, ...staleness.modifiedPaths];
+  }
 
   const store = await readStore(activeDir);
   const indexedAt = now();
@@ -235,6 +271,8 @@ export async function executeIndex(
   let failedCount = 0;
   let indexedCount = 0;
   const emptySkippedPaths: string[] = [];
+  let debugSkipReportPath: string | undefined;
+  const debugEntries: Array<{ path: string; kind: "empty" | "failure"; phase?: string; message: string }> = [];
 
   const targetTotal = Math.max(targets.length, 1);
   onProgress(progressPatch(now, { phase: "Indexing notes", done: 0, total: targetTotal }));
@@ -257,22 +295,50 @@ export async function executeIndex(
       return { path, contentHash };
     }
 
+    // Embed the note itself. Outline + section embeddings are treated as best-effort:
+    // if outline fails (e.g. "No headings found" or non-JSON output), we still index the note vector.
+    const items: IndexItem[] = [];
+    let vector: number[];
     try {
-      const items: IndexItem[] = [];
-      const vector = await embedText(context.config, content);
-      items.push({
-        id: path,
-        vector,
-        metadata: {
-          kind: "note",
+      vector = await embedText(context.config, content);
+    } catch (error) {
+      if (!continueOnEmbedError) throw error;
+      completedTargets += 1;
+      onProgress({ done: completedTargets, total: targetTotal });
+      return {
+        path,
+        failure: {
           path,
-          title: buildNoteTitle(path),
+          message: formatEmbeddingFailure(context.config, path, error),
+          phase: errorMessage(error).split(":")[0] ?? undefined,
+          rawErrorMessage: errorMessage(error),
         },
-      });
+      };
+    }
 
-      const outline = vault.outline ? await vault.outline(path) : [];
-      const sections = extractSectionChunks(content, outline);
-      for (const section of sections) {
+    items.push({
+      id: path,
+      vector,
+      metadata: {
+        kind: "note",
+        path,
+        title: buildNoteTitle(path),
+      },
+    });
+
+    let outline: OutlineNode[] = [];
+    if (vault.outline) {
+      try {
+        outline = await vault.outline(path);
+      } catch {
+        // Ignore outline failures; section evidence is best-effort.
+        outline = [];
+      }
+    }
+
+    const sections = extractSectionChunks(content, outline);
+    for (const section of sections) {
+      try {
         const sectionVector = await embedText(context.config, section.text);
         items.push({
           id: buildSectionItemId(path, section.slug, 1),
@@ -285,24 +351,14 @@ export async function executeIndex(
             sectionLevel: section.level,
           },
         });
+      } catch {
+        // Ignore section embedding failures; keep the note vector indexed.
       }
-      completedTargets += 1;
-      onProgress({ done: completedTargets, total: targetTotal });
-      return { path, contentHash, items };
-    } catch (error) {
-      if (!continueOnEmbedError) {
-        throw error;
-      }
-      completedTargets += 1;
-      onProgress({ done: completedTargets, total: targetTotal });
-      return {
-        path,
-        failure: {
-          path,
-          message: formatEmbeddingFailure(context.config, path, error),
-        },
-      };
     }
+
+    completedTargets += 1;
+    onProgress({ done: completedTargets, total: targetTotal });
+    return { path, contentHash, items };
   });
 
   for (const result of targetResults) {
@@ -310,12 +366,27 @@ export async function executeIndex(
       emptySkippedPaths.push(result.path);
       delete manifestFiles[result.path];
       deleteEntriesForPath(store, result.path);
+      if (debugSkips) {
+        debugEntries.push({
+          path: result.path,
+          kind: "empty",
+          message: "no content to index (vault.read returned empty string)",
+        });
+      }
       continue;
     }
     if ("failure" in result) {
       failedCount += 1;
       if (failureSamples.length < maxFailureSamples) {
         failureSamples.push(result.failure);
+      }
+      if (debugSkips) {
+        debugEntries.push({
+          path: result.path,
+          kind: "failure",
+          phase: result.failure.phase,
+          message: result.failure.rawErrorMessage ? result.failure.rawErrorMessage : result.failure.message,
+        });
       }
       continue;
     }
@@ -337,6 +408,14 @@ export async function executeIndex(
 
   if (!dimensions) {
     dimensions = existingManifest?.profile.dimensions ?? 768;
+  }
+
+  if (debugSkips) {
+    await Deno.mkdir(activeDir, { recursive: true });
+    const ts = String(Date.now());
+    debugSkipReportPath = `${activeDir}/debug-skip-report-${ts}.jsonl`;
+    const payload = debugEntries.map((e) => JSON.stringify(e)).join("\n") + "\n";
+    await Deno.writeTextFile(debugSkipReportPath, payload);
   }
 
   const shouldPersistProfile = existingManifest !== null || skipEmbed || targets.length === 0 ||
@@ -372,6 +451,7 @@ export async function executeIndex(
     failureSamples,
     skipEmbed,
     dryRun: false,
+    debugSkipReportPath,
   };
 }
 
@@ -395,9 +475,15 @@ function ProgressRunner(
   const [state, setState] = useState<IndexRunState>(initial);
 
   useEffect(() => {
-    executeIndex(context, args, (patch) => {
-      setState((previous: IndexRunState) => ({ ...previous, ...patch }));
-    })
+    const continueOnEmbedError = booleanFlag(args.flags, "continue-on-embed-error");
+    executeIndex(
+      context,
+      args,
+      (patch) => {
+        setState((previous: IndexRunState) => ({ ...previous, ...patch }));
+      },
+      { continueOnEmbedError },
+    )
       .then(() => setState((previous: IndexRunState) => ({ ...previous, finished: true })))
       .catch((error) =>
         setState((previous: IndexRunState) => ({
