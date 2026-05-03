@@ -10,6 +10,7 @@ Phase 0 foundation currently includes:
 - Profile-isolated index + manifest engine (`search/index.ts`)
 - `sam index` command
 - `sam connect` — similar notes via the vector index (shell route `/connect`)
+- `sam ls` — list markdown files with optional folder/tag exclusions
 - Ink home shell (default `sam` entrypoint)
 
 ## Usage
@@ -19,8 +20,19 @@ sam
 sam index
 sam connect
 sam connect "Projects/Some note.md"
+sam ls --exclude-folder "Archive,Templates" --exclude-tag "private,seedling"
 sam --dry-run index --skip-embed
 ```
+
+### Markdown listing (`sam ls`)
+
+List markdown notes in the current/selected vault, one path per line.
+
+- `--exclude-folder <folder[,folder...]>`: Exclude notes inside one or more
+  folders (matches both exact folder path and nested files).
+- `--exclude-tag <tag[,tag...]>`: Exclude notes containing one or more tags.
+  Accepts `#tag` or `tag`; nested tags (for example `#topic/subtopic`) are
+  excluded when their parent tag is excluded.
 
 ### Similar notes (`sam connect` / `/connect`)
 

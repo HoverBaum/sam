@@ -33,6 +33,11 @@ export interface OutlineNode {
   children: OutlineNode[]
 }
 
+export interface MarkdownFileWithTags {
+  path: string
+  tags: string[]
+}
+
 function decode(bytes: Uint8Array): string {
   return new TextDecoder().decode(bytes).trim()
 }
@@ -304,6 +309,31 @@ export class VaultClient {
   async files(ext = 'md'): Promise<string[]> {
     const stdout = await runObsidian(this.config, ['files', `ext=${ext}`])
     return splitLines(stdout)
+  }
+
+  async markdownFilesWithTags(): Promise<MarkdownFileWithTags[]> {
+    const stdout = await this.eval(
+      'JSON.stringify(app.vault.getMarkdownFiles().map((f) => { const cache = app.metadataCache.getFileCache(f) ?? {}; const inlineTags = (cache.tags ?? []).map((t) => t?.tag).filter((tag) => typeof tag === "string"); const frontmatterTags = Array.isArray(cache.frontmatter?.tags) ? cache.frontmatter.tags : typeof cache.frontmatter?.tags === "string" ? cache.frontmatter.tags.split(",") : []; const normalizedFrontmatterTags = frontmatterTags.map((tag) => String(tag).trim()).filter((tag) => tag.length > 0); return { path: f.path, tags: [...new Set([...inlineTags, ...normalizedFrontmatterTags])] }; }))',
+    )
+    const payload = parseJson(stdout, 'eval')
+    const rows = toArrayPayload(payload)
+    return rows
+      .map((row): MarkdownFileWithTags | undefined => {
+        if (!row || typeof row !== 'object') {
+          return undefined
+        }
+        const rec = row as Record<string, unknown>
+        const path = readString(rec, ['path', 'file'])
+        if (!path) {
+          return undefined
+        }
+        const rawTags = rec.tags
+        const tags = Array.isArray(rawTags)
+          ? rawTags.filter((value): value is string => typeof value === 'string')
+          : []
+        return { path, tags }
+      })
+      .filter((row): row is MarkdownFileWithTags => row !== undefined)
   }
 
   async read(path: string): Promise<string> {
