@@ -129,7 +129,12 @@ function truncateContext(text: string): string {
 }
 
 function cleanHeadingText(line: string): string {
-  return collapseWhitespace(line.replace(/^[ \t]{0,3}#{1,6}[ \t]+/, "").replace(/[ \t]+#*[ \t]*$/, ""));
+  const text = line
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+/, "")
+    .replace(/[ \t]+#*[ \t]*$/, "")
+    .replace(/\[\[([^|\]]+)(?:\|[^\]]+)?\]\]/g, "$1")
+    .replace(/(?<!!)\[[^\]]*]\(([^)]+)\)/g, "$1");
+  return collapseWhitespace(text);
 }
 
 function markdownLines(content: string): MarkdownLine[] {
@@ -187,7 +192,17 @@ function paragraphContext(lines: MarkdownLine[], lineIndex: number): string | un
     end += 1;
   }
   const text = collapseWhitespace(lines.slice(start, end + 1).map((line) => line.text.trim()).join(" "));
-  return text.length > 0 ? text : undefined;
+  if (!text) return undefined;
+  const listOnly = text
+    .replace(/^[-*+][ \t]+/, "")
+    .replace(/^\d+[.)][ \t]+/, "")
+    .trim();
+  const isOnlyWikilink = /^\[\[[^\]]+\]\]$/u.test(listOnly);
+  const isOnlyMarkdownLink = /^(?<!!)\[[^\]]*\]\([^)]+\)$/u.test(listOnly);
+  if (isOnlyWikilink || isOnlyMarkdownLink) {
+    return undefined;
+  }
+  return text;
 }
 
 function contextAtOffset(content: string, offset: number): string | undefined {
@@ -334,6 +349,6 @@ export async function runBacklinksCommand(context: CommandContext, args: Command
   if (!pathArg) {
     throw new Error("Usage: sam backlinks <path> [--context]");
   }
-  const includeContext = booleanFlag(args.flags, "context");
+  const includeContext = booleanFlag(args.flags, "context") || booleanFlag(args.flags, "c");
   await printBacklinksLines(context, pathArg, { includeContext });
 }

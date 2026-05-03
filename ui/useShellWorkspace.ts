@@ -438,7 +438,8 @@ export function useShellWorkspace(
         return
       }
       if (command.kind === 'backlinks') {
-        const sourcePath = command.path ?? lastBacklinksPath
+        const explicitPath = command.path.trim()
+        const sourcePath = explicitPath || lastBacklinksPath
         if (!sourcePath) {
           pushMessage('Usage: /backlinks <note path> [--context]')
           return
@@ -449,7 +450,7 @@ export function useShellWorkspace(
           const lines = await backlinksShellLines(context, sourcePath, {
             includeContext: command.includeContext,
           })
-          if (!command.path) {
+          if (!explicitPath) {
             lines[0] = `${lines[0]} (reusing previous path)`
           }
           for (const line of lines) {
