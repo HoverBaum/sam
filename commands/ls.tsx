@@ -1,4 +1,5 @@
 import type { RuntimeConfig } from "../config.ts";
+import { normalize as normalizePosixPath, relative as relativePosixPath } from "@std/path/posix";
 import type { CommandArgs, CommandContext } from "../types.ts";
 import type { MarkdownFileWithTags } from "../vault/client.ts";
 import { VaultClient } from "../vault/client.ts";
@@ -36,18 +37,27 @@ function parseCsvFlag(
   return values;
 }
 
+function normalizeVaultPath(value: string): string {
+  let normalized = normalizePosixPath(value.replaceAll("\\", "/")).trim();
+  while (normalized.startsWith("./")) {
+    normalized = normalized.slice(2);
+  }
+  normalized = normalized.replace(/^\/+/, "").replace(/\/+$/, "");
+  return normalized === "." ? "" : normalized;
+}
+
 function normalizeFolder(value: string): string | null {
-  const normalized = value
-    .replaceAll("\\", "/")
-    .replace(/^\.\/+/, "")
-    .replace(/^\/+/, "")
-    .replace(/\/+$/, "")
-    .trim();
+  const normalized = normalizeVaultPath(value);
   return normalized.length > 0 ? normalized : null;
 }
 
 function pathIsInFolder(path: string, folder: string): boolean {
-  return path === folder || path.startsWith(`${folder}/`);
+  const normalizedPath = normalizeVaultPath(path);
+  if (normalizedPath === folder) {
+    return true;
+  }
+  const rel = relativePosixPath(folder, normalizedPath);
+  return rel.length > 0 && rel !== "." && !rel.startsWith("../");
 }
 
 function normalizeTag(value: string): string | null {

@@ -57,6 +57,31 @@ Deno.test("executeLs excludes folders from markdown listing", async () => {
   assertEquals(result.excludedByFolder, 2);
 });
 
+Deno.test("executeLs normalizes folder filters using posix path rules", async () => {
+  const result = await executeLs(
+    testContext(),
+    {
+      flags: {
+        "exclude-folder": ".\\Inbox\\sub/,/Templates/",
+      },
+      positionals: [],
+    },
+    {
+      createVaultClient: () => ({
+        files: async () => [
+          "Inbox/sub/a.md",
+          "Inbox/sub/deep/b.md",
+          "Templates/c.md",
+          "Projects/d.md",
+        ],
+      }),
+    },
+  );
+
+  assertEquals(result.paths, ["Projects/d.md"]);
+  assertEquals(result.excludedByFolder, 3);
+});
+
 Deno.test("executeLs excludes tagged notes with nested tag matching", async () => {
   const result = await executeLs(
     testContext(),
