@@ -10,6 +10,7 @@ Phase 0 foundation currently includes:
 - Profile-isolated index + manifest engine (`search/index.ts`)
 - `sam index` command
 - `sam connect` — similar notes via the vector index (shell route `/connect`)
+- `sam backlinks` — inbound + outbound links for a note (optional `--context`)
 - Ink home shell (default `sam` entrypoint)
 
 ## Usage
@@ -19,6 +20,8 @@ sam
 sam index
 sam connect
 sam connect "Projects/Some note.md"
+sam backlinks "Projects/Some note.md"
+sam backlinks "Projects/Some note.md" --context
 sam --dry-run index --skip-embed
 ```
 
@@ -32,6 +35,17 @@ back. Settings now live at `/config` with per-field routes under
 that screen. Non-interactive: `sam connect "<vault path>"` prints
 `path<TAB>score` lines for scripting. Re-run `sam index` when the shell warns
 that notes changed so results stay fresh.
+
+### Link graph view (`sam backlinks` / `/backlinks`)
+
+Show both outbound and inbound links for a note:
+
+- `sam backlinks "<vault path>"`
+- `sam backlinks "<vault path>" --context`
+
+With `--context`, each link includes a best-effort snippet from markdown:
+paragraph containing the link when available, otherwise the nearest heading.
+In the shell, use `/backlinks <path>` (or `/backlinks <path> --context`).
 
 Global flags:
 

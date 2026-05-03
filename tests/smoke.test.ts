@@ -31,6 +31,16 @@ Deno.test("parseShellCommand canonicalizes shell navigation commands", () => {
     kind: "navigate",
     path: "/connect",
   });
+  assertEquals(parseShellCommand("/backlinks Notes/Idea.md --context"), {
+    kind: "backlinks",
+    path: "Notes/Idea.md",
+    includeContext: true,
+  });
+  assertEquals(parseShellCommand("/backlinks"), {
+    kind: "backlinks",
+    path: "",
+    includeContext: false,
+  });
   assertEquals(parseShellCommand("/settings"), {
     kind: "navigate",
     path: "/config",
