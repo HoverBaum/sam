@@ -11,6 +11,7 @@ export type ShellCommand =
   | { kind: "help" }
   | { kind: "index" }
   | { kind: "new" }
+  | { kind: "backlinks"; path: string; includeContext: boolean }
   | { kind: "navigate"; path: "/" | "/connect" | "/config" };
 
 export const FIELD_ORDER: SettingsField[] = [
@@ -50,6 +51,20 @@ export function parseShellCommand(input: string): ShellCommand {
   const trimmed = input.trim();
 
   if (trimmed === "") return { kind: "noop" };
+  if (trimmed.startsWith("/backlinks")) {
+    const rest = trimmed.slice("/backlinks".length).trim();
+    if (!rest) {
+      return { kind: "backlinks", path: "", includeContext: false };
+    }
+    const tokens = rest.split(/\s+/).filter((token) => token.length > 0);
+    const includeContext = tokens.some((token) => token === "--context" || token === "-c");
+    const pathTokens = tokens.filter((token) => token !== "--context" && token !== "-c");
+    return {
+      kind: "backlinks",
+      path: pathTokens.join(" "),
+      includeContext,
+    };
+  }
   if (trimmed.startsWith("/new")) return { kind: "new" };
   if (trimmed.startsWith("/index")) return { kind: "index" };
   if (trimmed.startsWith("/connect")) {

@@ -19,6 +19,7 @@ import {
   settingsFieldPath,
 } from './shellRouting.ts'
 import { executeIndex, indexShellMessages } from '../commands/index.tsx'
+import { backlinksShellLines } from '../commands/backlinks.ts'
 import {
   loadConfigFile,
   saveConfigFile,
@@ -150,6 +151,7 @@ export function useShellWorkspace(
   const [editBuffer, setEditBuffer] = useState('')
   const [autocompleteIndex, setAutocompleteIndex] = useState(0)
   const [vaultSuggestions, setVaultSuggestions] = useState<string[]>([])
+  const [lastBacklinksPath, setLastBacklinksPath] = useState<string | null>(null)
 
   const fieldMatch = matchPath('/config/:field', location.pathname)
   const editingField = normalizeSettingsField(fieldMatch?.params.field)
@@ -199,7 +201,7 @@ export function useShellWorkspace(
     if (isSettingsMenu) {
       return '↑↓ pick field · Enter edit · S save · Esc shell'
     }
-    return '/connect similar notes · /config settings · /index refresh index · /help routes'
+    return '/connect similar notes · /backlinks graph view · /config settings · /index refresh index · /help routes'
   }, [busy, editingField, isSettingsMenu])
 
   const pushMessage = (text: string) => {
@@ -435,13 +437,49 @@ export function useShellWorkspace(
         }
         return
       }
+      if (command.kind === 'backlinks') {
+        const explicitPath = command.path.trim()
+        const sourcePath = explicitPath || lastBacklinksPath
+        if (!sourcePath) {
+          pushMessage('Usage: /backlinks <note path> [--context]')
+          return
+        }
+        setBusy(true)
+        pushMessage(`Building backlinks for ${sourcePath}...`)
+        try {
+          const lines = await backlinksShellLines(context, sourcePath, {
+            includeContext: command.includeContext,
+          })
+          if (!explicitPath) {
+            lines[0] = `${lines[0]} (reusing previous path)`
+          }
+          for (const line of lines) {
+            pushMessage(line)
+          }
+          setLastBacklinksPath(sourcePath)
+        } catch (error) {
+          const message = String((error as Error).message ?? error)
+          if (message.includes(OBSIDIAN_CONNECTION_ERROR)) {
+            pushMessage(
+              'Backlinks failed: Obsidian is not connected. Open Obsidian and retry.',
+            )
+          } else if (message.includes(OBSIDIAN_MISSING_ERROR)) {
+            pushMessage('Backlinks failed: Obsidian CLI not found in PATH.')
+          } else {
+            pushMessage(`Backlinks failed: ${message}`)
+          }
+        } finally {
+          setBusy(false)
+        }
+        return
+      }
       if (command.kind === 'unknown') {
         pushMessage('Unknown command. Try /help.')
         return
       }
       if (command.kind === 'help') {
         pushMessage(
-          'Routes: /home, /connect, /config, /config/<field>. Commands: /new, /index, /help. Ctrl+C exits.',
+          'Routes: /home, /connect, /config, /config/<field>. Commands: /new, /index, /backlinks <path> [--context], /help. Ctrl+C exits.',
         )
         return
       }
